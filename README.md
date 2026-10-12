@@ -1,4 +1,4 @@
-# NFL Defense vs Role — v1.0
+# NFL Defense vs Role + QB Rushing — v1.1
 
 Personal dashboard for fantasy and props. Shows what each defense allows to an
 offense's WR1 / WR2 / WR3 / TE / RB, with this week's matchups ranked by edge.
@@ -32,6 +32,25 @@ your email.
 Sidebar: season, stat (PPR, yards, receptions, targets, TDs, air yards),
 per-game vs. league-relative view, and week range (drag the left handle for
 recent form only).
+
+## QB rushing tab (v1.1)
+
+Three sub-tabs, all using the sidebar season and week range:
+
+- **QB profiles:** every starter with designed runs/g, sneaks, YPC ex-sneak,
+  dropbacks/g, scramble %, yards/scramble, kneel yards, average and median
+  official rush yards, % of games over your line, and last-4 versions. Pick a QB
+  for his splits (with sample sizes), next opponent's defense card, and game log.
+- **Defense profiles:** QB rushing allowed, plus **vs norm** columns (what QBs did
+  against this defense minus what those same QBs did in their other starts),
+  blitz %, sack+hit %, pass EPA allowed, and run D vs RBs. Pick a defense to see
+  each QB it faced vs. his norm.
+- **League-wide splits:** all starters pooled by opponent trait, to test whether
+  a trait moves QB rushing at all.
+
+Definitions: starter = most dropbacks in the game. Official yards include kneels
+(how props settle); designed/scramble numbers exclude kneels. Sneaks use FTN's
+flag, falling back to 3rd/4th-and-1 designed runs when a play isn't charted yet.
 
 ## How roles are assigned
 

@@ -11,6 +11,7 @@ import pandas as pd
 import streamlit as st
 
 import nfl_data as d
+import qb_tab
 
 st.set_page_config(page_title="Defense vs Role", page_icon="🏈", layout="wide")
 
@@ -113,8 +114,8 @@ def style_grid(df: pd.DataFrame, cols: list[str]):
     return sty
 
 
-tab_week, tab_grid, tab_log, tab_roles = st.tabs(
-    ["This week", "Defense grid", "Defense game log", "Team roles (audit)"])
+tab_week, tab_grid, tab_log, tab_roles, tab_qb = st.tabs(
+    ["This week", "Defense grid", "Defense game log", "Team roles (audit)", "QB rushing"])
 
 # --------------------------------------------------------------------------
 # Tab 1: this week's matchups, player by player
@@ -219,6 +220,12 @@ with tab_roles:
         st.caption("Active overrides:")
         st.dataframe(season_ov, hide_index=True)
 
+# --------------------------------------------------------------------------
+# Tab 5: QB rushing (self-contained module)
+# --------------------------------------------------------------------------
+with tab_qb:
+    qb_tab.render(season, include_post, weeks, nxt)
+
 st.divider()
-st.caption("Data: nflverse (CC-BY 4.0) via nflreadpy. Receiving only; "
-           "PPR = rec + yds/10 + 6×TD. Sacks, scrambles and 2-pt tries excluded.")
+st.caption("Data: nflverse (CC-BY 4.0) + FTN charting (CC-BY-SA 4.0) via nflreadpy. "
+           "Receiving tabs: PPR = rec + yds/10 + 6×TD. Sacks, scrambles and 2-pt tries excluded.")
