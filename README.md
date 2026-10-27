@@ -1,4 +1,4 @@
-# NFL Defense vs Role + QB Rushing — v1.1
+# NFL Defense vs Role + QB Rushing — v1.2
 
 Personal dashboard for fantasy and props. Shows what each defense allows to an
 offense's WR1 / WR2 / WR3 / TE / RB, with this week's matchups ranked by edge.
@@ -51,6 +51,24 @@ Three sub-tabs, all using the sidebar season and week range:
 Definitions: starter = most dropbacks in the game. Official yards include kneels
 (how props settle); designed/scramble numbers exclude kneels. Sneaks use FTN's
 flag, falling back to 3rd/4th-and-1 designed runs when a play isn't charted yet.
+
+### Coverage & play-callers (v1.2)
+
+- `coordinators.csv`: head coach, DC and **defensive play-caller** for every team,
+  2022–2026, with sources. Edit it in GitHub to fix a row; the app uses the
+  `def_playcaller` column (text before any `;`).
+- `coverage_team_seasons.csv` / `coverage_league.csv`: precomputed man/zone rate,
+  true pressure rate and scrambles per team-season (2022–2025) from NFL Next Gen
+  Stats via nflverse. These seasons don't change, so the app reads the files
+  instead of re-downloading. After nflverse publishes a new season's
+  participation data (usually after the season), rebuild locally with
+  `python coverage.py 2022 2023 2024 2025 2026` and commit the two CSVs.
+- In the app: Defense profiles gain Play-caller / Coverage lean / Caller man z;
+  the QB detail's next-opponent card shows the play-caller and his past man
+  rates; the **Coverage & play-callers** sub-tab lists every defense.
+- Coverage lean = average man rate of defenses the current play-caller called in
+  prior seasons, vs that season's league: Man-heavy ≥ +0.5 SD, Zone-heavy ≤ −0.5 SD,
+  Unknown = no prior play-calling data.
 
 ## How roles are assigned
 

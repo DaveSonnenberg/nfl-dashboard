@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+import coverage as cv
 import qb_data as q
 
 PCT = "{:.1%}"
@@ -18,6 +19,30 @@ def _load(season: int, include_post: bool):
     p, players = q.load_plays(season, include_post)
     qg = q.qb_games(p, players)
     return p, players, qg
+
+
+@st.cache_data(ttl=6 * 3600)
+def _coverage(season: int):
+    """Play-caller + man/zone history per defense. None if the files are missing."""
+    try:
+        cov, lg, co = cv.load()
+    except FileNotFoundError:
+        return None, None
+    return cv.caller_view(season, cov, co), lg
+
+
+def _lg_gap(lg: pd.DataFrame | None) -> str:
+    if lg is None:
+        return "more"
+    a = lg[lg["group"] == "All QBs"].set_index("coverage")["yds_per_scramble"]
+    t = lg[lg["group"] == "Top-12 scramblers"].set_index("coverage")["yds_per_scramble"]
+    return f"~{a['Man'] - a['Zone']:.1f} (top scramblers ~{t['Man'] - t['Zone']:.1f})"
+
+
+def _man_cell(z, last_pct, last_rank) -> str:
+    if pd.isna(z):
+        return "Unknown (no history)"
+    return f"{cv.man_label(z)} ({z:+.1f} SD; last {last_pct:.0%}, {cv._ordinal(int(last_rank))})"
 
 
 def _fmt(df: pd.DataFrame) -> dict:
@@ -55,6 +80,7 @@ def render(season: int, include_post: bool, weeks: tuple[int, int], nxt: pd.Data
     traits = q.add_ranks(dp)
     qt = q.with_traits(qg, traits)
     next_opp = dict(zip(nxt["team"], nxt["next_opp"])) if len(nxt) else {}
+    callers, cov_lg = _coverage(season)
 
     c1, c2, _ = st.columns([1, 1, 3])
     line = c1.number_input("Prop line (rush yds)", 0.0, 150.0, 24.5, 1.0)
@@ -65,7 +91,8 @@ def render(season: int, include_post: bool, weeks: tuple[int, int], nxt: pd.Data
         "scramble numbers exclude them. Splits put opponents in top/bottom half of the league "
         "on each trait over the same window.")
 
-    sub_qb, sub_def, sub_league = st.tabs(["QB profiles", "Defense profiles", "League-wide splits"])
+    sub_qb, sub_def, sub_cov, sub_league = st.tabs(
+        ["QB profiles", "Defense profiles", "Coverage & play-callers", "League-wide splits"])
 
     # ------------------------------------------------------------------ QBs
     with sub_qb:
@@ -110,6 +137,15 @@ def render(season: int, include_post: bool, weeks: tuple[int, int], nxt: pd.Data
                 if opp:
                     od = opp.lstrip("@")
                     st.markdown(f"**Next: {opp}** — {od} defense vs league")
+                    if callers is not None and od in callers.index:
+                        c = callers.loc[od]
+                        new = " · new play-caller" if c["New caller"] == True else ""
+                        st.markdown(
+                            f"Play-caller: **{c['Play-caller']}**{new}  \n"
+                            f"Coverage lean: **{_man_cell(c['Caller man z'], c['Caller last man %'], c['Caller last rank'])}**")
+                        st.caption(f"His past defenses: {c['Caller history']}. "
+                                   f"League-wide, man coverage yields "
+                                   f"{_lg_gap(cov_lg)} more yards per scramble than zone.")
                     if od in dp.index:
                         ranks = dp.rank(ascending=False)
                         card_cols = ["G", "QB rush yds /g", "Rush yds vs norm /g",
@@ -164,14 +200,22 @@ def render(season: int, include_post: bool, weeks: tuple[int, int], nxt: pd.Data
     with sub_def:
         show = dp.copy()
         show.insert(1, "Next", show.index.map(lambda t: next_opp.get(t, "")))
+        if callers is not None:
+            show.insert(2, "Play-caller", show.index.map(callers["Play-caller"]))
+            show.insert(3, "Coverage lean", show.index.map(
+                lambda t: cv.man_label(callers["Caller man z"].get(t, np.nan))))
+            show.insert(4, "Caller man z", show.index.map(callers["Caller man z"]))
         show = show.rename(columns={"adj_games": "Adj G"})
         sort_by = st.selectbox("Sort by", ["Rush yds vs norm /g", "Scrambles vs norm /g",
                                            "Designed vs norm /g", "QB rush yds /g",
+                                           *(["Caller man z"] if callers is not None else []),
                                            "Blitz %", "Sack+hit %", "Pass EPA/db",
                                            "RB rush EPA"], key="def_sort")
         show = show.sort_values(sort_by, ascending=False).reset_index().rename(
             columns={"defteam": "Defense"})
-        sty = _centered(show.style.format(_fmt(show), na_rep="—"), show,
+        fm = _fmt(show)
+        fm["Caller man z"] = "{:+.1f}"
+        sty = _centered(show.style.format(fm, na_rep="—"), show,
                         ["Rush yds vs norm /g", "Scrambles vs norm /g", "Designed vs norm /g"])
         st.dataframe(sty, hide_index=True, width="stretch", height=1180)
         st.caption(
@@ -180,7 +224,10 @@ def render(season: int, include_post: bool, weeks: tuple[int, int], nxt: pd.Data
             "Adj G = games where the QB had another start to compare against. "
             "Scramble % is per dropback faced. Blitz % uses FTN-charted dropbacks only "
             "(the latest week can lag a few days). Sack+hit % is a pressure proxy; "
-            "true pressure rate isn't in free data.")
+            "true pressure rate isn't in free data for the current season. "
+            "**Caller man z** = man-coverage rate of the defenses this season's play-caller "
+            "called in prior seasons, vs that season's league (SD). Man-heavy ≥ +0.5, "
+            "zone-heavy ≤ −0.5. Details in the Coverage & play-callers tab.")
 
         st.divider()
         dsel = st.selectbox("Defense detail: QBs faced", sorted(dp.index), key="def_pick")
@@ -203,6 +250,53 @@ def render(season: int, include_post: bool, weeks: tuple[int, int], nxt: pd.Data
             hide_index=True, width="stretch")
         st.caption("Expected scr = his scramble rate in other starts × dropbacks in this game. "
                    "Norms built on 1–2 other games are weak; check the last column.")
+
+    # ------------------------------------------------- Coverage & callers
+    with sub_cov:
+        if callers is None:
+            st.info("coverage_team_seasons.csv / coordinators.csv not found in the repo.")
+        else:
+            st.markdown(f"**{season} defensive play-callers and the coverage their past defenses played**")
+            t = callers.reset_index().rename(columns={"team": "Defense"})
+            t.insert(1, "Next", t["Defense"].map(lambda x: next_opp.get(x, "")))
+            t.insert(4, "Coverage lean", t["Caller man z"].map(cv.man_label))
+            t["Team prior"] = np.where(
+                t["Team prior man %"].notna(),
+                t["Team prior season"].map(lambda s: f"{int(s)}: " if pd.notna(s) else "")
+                + t["Team prior man %"].map(lambda x: f"{x:.0%}" if pd.notna(x) else "")
+                + t["Team prior rank"].map(lambda r: f" ({cv._ordinal(int(r))})" if pd.notna(r) else ""),
+                "—")
+            t["New caller"] = t["New caller"].map(lambda v: "Yes" if v is True or v == True else "")
+            t = t[["Defense", "Next", "Play-caller", "New caller", "Coverage lean", "Caller man z",
+                   "Caller history", "Caller pressure %", "Team prior", "confidence"]]
+            t = t.sort_values("Caller man z", ascending=False, na_position="last")
+            lim = float(np.nanmax(np.abs(t["Caller man z"]))) or 1.0
+            st.dataframe(
+                t.style.format({"Caller man z": "{:+.2f}", "Caller pressure %": "{:.0%}"}, na_rep="—")
+                 .background_gradient(cmap="PuOr_r", subset=["Caller man z"], vmin=-lim, vmax=lim),
+                hide_index=True, width="stretch", height=1180,
+                column_config={"Caller history": st.column_config.TextColumn(width="large")})
+            st.caption(
+                "History = each prior season he called the defense: man % of coverage-tagged "
+                "dropbacks and league rank (1st = most man). Caller man z averages those seasons "
+                "vs each season's league, because league-wide man rates swing a lot by year. "
+                "Pressure % is true pressure (NFL Next Gen Stats) on his past defenses. "
+                "Team prior = this team's own man rate last season, whoever called it. "
+                "Coverage data covers 2022 through the latest released season; the current "
+                "season is released after it ends. Edit coordinators.csv to fix a play-caller.")
+
+            st.divider()
+            st.markdown("**League-wide: QB scrambles vs man and zone coverage**")
+            lt = cov_lg.rename(columns={
+                "group": "QBs", "coverage": "Coverage", "scrambles": "Scrambles",
+                "yds_per_scramble": "Yds/scramble", "median": "Median", "pct_10plus": "10+ yds",
+                "pct_20plus": "20+ yds"}).drop(columns=["scramble_rate_all"], errors="ignore")
+            st.dataframe(lt.style.format({"Yds/scramble": "{:.2f}", "Median": "{:.0f}",
+                                          "10+ yds": "{:.0%}", "20+ yds": "{:.1%}",
+                                          "Scramble rate (all QBs)": "{:.1%}"}),
+                         hide_index=True, width="stretch")
+            st.caption("Regular-season dropbacks with a man/zone tag. Top-12 = the 12 highest "
+                       "scramble-rate QBs with 800+ dropbacks: " + ", ".join(cv.TOP_SCRAMBLERS) + ".")
 
     # --------------------------------------------------------- League-wide
     with sub_league:

@@ -1,0 +1,5 @@
+group,coverage,scrambles,yds_per_scramble,median,pct_10plus,pct_20plus,scramble_rate_all
+All QBs,Man,1275,8.4573,7.0,0.3161,0.0761,0.043
+All QBs,Zone,1884,6.8864,6.0,0.232,0.0324,0.0384
+Top-12 scramblers,Man,545,9.2055,7.0,0.3376,0.0881,0.043
+Top-12 scramblers,Zone,766,7.1684,6.0,0.2389,0.0457,0.0384
