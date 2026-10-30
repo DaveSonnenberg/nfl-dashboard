@@ -1,4 +1,4 @@
-# NFL Defense vs Role + QB Rushing — v1.2
+# NFL Dashboard: Props, Defense vs Role, QB Rushing — v1.3
 
 Personal dashboard for fantasy and props. Shows what each defense allows to an
 offense's WR1 / WR2 / WR3 / TE / RB, with this week's matchups ranked by edge.
@@ -19,6 +19,43 @@ it for 6 hours. Nothing to schedule or maintain.
 
 Optional: in the app's Streamlit settings → *Sharing*, restrict viewers to
 your email.
+
+## Props tab (v1.3)
+
+Projections for **receptions, receiving yards, rush attempts, rushing yards and
+passing yards** for every team's next game, compared with sportsbook lines.
+
+Columns: player · team · opponent · season and last-4 averages · usage driver
+(target/carry share, attempts, YPA) · what the opponent allows (with rank) ·
+**Projection** (average) · **Fair line** (where the model sees 50/50) · line and
+odds · **P(over)** · **Book P(over)** (margin removed) · **Edge** (green at ≥5
+pts) · **EV** per $1 · flags (injury status, <4 games, new team, teammates out).
+Pick a player below the table for how the projection was built, the outcome
+distribution with the line marked, and his game log.
+
+### Odds API setup (one time)
+1. Get a key at the-odds-api.com (free plan = 500 credits/month).
+2. In Streamlit Cloud: your app → **Settings → Secrets**, add
+   `ODDS_API_KEY = "your-key"` → Save. The app restarts.
+3. In the Props tab press **Pull latest odds**. One pull ≈ 5 credits per game,
+   ~70–80 for a full week (free plan ≈ 6 pulls/month). Pulls are reused for 12
+   hours so reloading the page doesn't spend credits.
+
+No key, or a market missing from the feed? Use **Enter or override lines by
+hand** under the table (kept for your browser session only).
+
+### How the projections work
+Backtested on 2024 and 2025 (trained on earlier seasons). Code and write-ups in
+`model/`; coefficients in `model/coefs.json`, outcome distributions in
+`model/dist_specs.json`.
+- Receiving: team targets × target share (recent games weighted more) × catch
+  rate / yards per target, adjusted for spread, total and opponent targets allowed.
+- Rushing: team RB carries × carry share × yards per carry, adjusted for spread,
+  total, opponent carries and YPC allowed.
+- Passing: team attempts × QB yards per attempt, adjusted for spread, total,
+  opponent attempts and YPA allowed. Starter = nflverse's listed starter.
+- Players ruled Out/Doubtful on the injury report are removed and half of their
+  usage is redistributed to teammates.
 
 ## Tabs
 

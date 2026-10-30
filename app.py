@@ -11,6 +11,7 @@ import pandas as pd
 import streamlit as st
 
 import nfl_data as d
+import props_tab
 import qb_tab
 
 st.set_page_config(page_title="Defense vs Role", page_icon="🏈", layout="wide")
@@ -114,8 +115,8 @@ def style_grid(df: pd.DataFrame, cols: list[str]):
     return sty
 
 
-tab_week, tab_grid, tab_log, tab_roles, tab_qb = st.tabs(
-    ["This week", "Defense grid", "Defense game log", "Team roles (audit)", "QB rushing"])
+tab_props, tab_week, tab_grid, tab_log, tab_roles, tab_qb = st.tabs(
+    ["Props", "This week", "Defense grid", "Defense game log", "Team roles (audit)", "QB rushing"])
 
 # --------------------------------------------------------------------------
 # Tab 1: this week's matchups, player by player
@@ -129,8 +130,7 @@ with tab_week:
         m["opp_def"] = m["next_opp"].str.lstrip("@")
         m = m.merge(dvr[["defteam", "role", col, "avg", "diff", "pct", "games"]],
                     left_on=["opp_def", "role"], right_on=["defteam", "role"], how="left")
-        wk = int(m["next_week"].min())
-        m = m[m["next_week"] == wk]
+        wk = int(m["next_week"].mode().iloc[0])
 
         c1, c2 = st.columns([2, 3])
         role_pick = c1.multiselect("Roles", d.ROLE_ORDER, default=d.ROLE_ORDER)
@@ -148,6 +148,7 @@ with tab_week:
         }).sort_values("Edge", ascending=False)
 
         st.subheader(f"Week {wk}: who has the soft matchup")
+        st.caption("Each team's next game (teams that already played this week show their following game).")
         st.caption("Roles are projected from target share through each team's last game. "
                    "Anyone who missed that game is not listed, so check injury news. "
                    "Edge = what the opponent allows to this role minus league average.")
@@ -219,6 +220,12 @@ with tab_roles:
     if len(season_ov):
         st.caption("Active overrides:")
         st.dataframe(season_ov, hide_index=True)
+
+# --------------------------------------------------------------------------
+# Props: projections vs lines (self-contained module, current season only)
+# --------------------------------------------------------------------------
+with tab_props:
+    props_tab.render()
 
 # --------------------------------------------------------------------------
 # Tab 5: QB rushing (self-contained module)
