@@ -1,0 +1,3 @@
+.odds_cache.json
+__pycache__/
+.streamlit/secrets.toml
