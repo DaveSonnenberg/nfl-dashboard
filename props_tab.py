@@ -25,9 +25,25 @@ def _season() -> int:
     return t.year if t.month >= 8 else t.year - 1
 
 
+@st.cache_resource(ttl=6 * 3600, show_spinner="Loading nflverse data…")
+def _raw(season: int):
+    return pm.load_raw([season - 2, season - 1, season], current=season)
+
+
 @st.cache_data(ttl=6 * 3600, show_spinner="Building this week's projections…")
-def _projections(season: int):
-    return pm.project([season - 2, season - 1, season])
+def _projections(season: int, manual_out: tuple = ()):
+    return pm.project([season - 2, season - 1, season], manual_out=manual_out, raw=_raw(season))
+
+
+@st.cache_data(ttl=6 * 3600)
+def _out_options(season: int) -> pd.DataFrame:
+    """Players with real volume who could be ruled out (shown in the picker)."""
+    R = _projections(season, ())
+    p = R["players"]
+    p = p[(p["E_tgt"] >= 1.5) | (p["E_car0"] >= 3)]
+    p = pd.concat([p, R["out"].assign(pos=R["out"]["position"])], ignore_index=True)
+    p = p.drop_duplicates("player_id").sort_values(["team", "name"])
+    return p[["player_id", "name", "team", "pos"]]
 
 
 def _api_key() -> str | None:
@@ -118,7 +134,18 @@ def _flags(r, out_by_team: dict) -> str:
 # --------------------------------------------------------------------------
 def render():
     season = _season()
-    R = _projections(season)
+    opts = _out_options(season)
+    label = {r.player_id: f"{r.name} · {r.team} {r.pos}" for r in opts.itertuples(index=False)}
+    auto = _projections(season, ())["out"]
+    auto = auto[auto["inj_status"] == "Out"]
+    picked = st.multiselect(
+        "Ruled out this week", options=list(label), format_func=label.get, key="pm_out",
+        placeholder="Add players who won't play (official Out designations are applied automatically)",
+        help="Removes the player and shifts his usage to teammates (mostly the same position). "
+             "Only mark players who are ruled out — questionable players stay in.")
+    st.caption("From the official injury report: " + (", ".join(f"{n} ({t})" for n, t in zip(auto["name"], auto["team"]))
+               if len(auto) else "no Out designations in nflverse yet for this week (they usually appear Friday night/Saturday)."))
+    R = _projections(season, tuple(sorted(picked)))
     dist = R["dist"]
     out_by_team = R["out"].groupby("team")["name"].apply(list).to_dict() if len(R["out"]) else {}
 

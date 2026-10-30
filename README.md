@@ -1,4 +1,4 @@
-# NFL Dashboard: Props, Defense vs Role, QB Rushing — v1.3
+# NFL Dashboard: Props, Defense vs Role, QB Rushing — v1.3.1
 
 Personal dashboard for fantasy and props. Shows what each defense allows to an
 offense's WR1 / WR2 / WR3 / TE / RB, with this week's matchups ranked by edge.
@@ -54,8 +54,13 @@ Backtested on 2024 and 2025 (trained on earlier seasons). Code and write-ups in
   total, opponent carries and YPC allowed.
 - Passing: team attempts × QB yards per attempt, adjusted for spread, total,
   opponent attempts and YPA allowed. Starter = nflverse's listed starter.
-- Players ruled Out/Doubtful on the injury report are removed and half of their
-  usage is redistributed to teammates.
+- **Ruled-out players:** anyone with an official **Out** designation (nflverse
+  injury report) is removed automatically. Designations usually reach nflverse
+  Friday night/Saturday, so use the **Ruled out this week** picker at the top of
+  the Props tab to remove players sooner. Questionable/Doubtful players stay in
+  (flagged). A removed player's targets go mainly to teammates at his position
+  (half of his share is redistributed; backtested in `model/redistribute.py`);
+  carries go to the remaining backs.
 
 ## Tabs
 

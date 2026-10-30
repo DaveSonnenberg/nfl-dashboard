@@ -109,6 +109,13 @@ def next_games(sch: pd.DataFrame) -> pd.DataFrame:
 # ==========================================================================
 # player-game universe (history + upcoming)
 # ==========================================================================
+def candidates(raw: dict) -> pd.DataFrame:
+    """Players the upcoming projections would include (before any Out removals)."""
+    raw2 = {**raw, "manual_out": (), "inj": None}
+    u, _ = _universe(raw2, True)
+    return u[u["upcoming"]][["player_id", "name", "position", "team"]]
+
+
 def _universe(raw: dict, include_upcoming: bool) -> tuple[pd.DataFrame, pd.DataFrame]:
     ps, sn, players = raw["ps"], raw["sn"], raw["players"]
     pfr2gsis = players.dropna(subset=["pfr_id", "gsis_id"]).drop_duplicates("pfr_id").set_index("pfr_id")["gsis_id"]
@@ -154,10 +161,12 @@ def _universe(raw: dict, include_upcoming: bool) -> tuple[pd.DataFrame, pd.DataF
             if inj is not None and len(inj):
                 ii = inj[(inj["season"] == cur) & (inj["week"] == r.week) & (inj["team"] == r.team)]
                 status = dict(zip(ii["gsis_id"], ii["report_status"]))
-            b["inj_status"] = b["player_id"].map(status)
-            out_now = b[b["inj_status"].isin(["Out", "Doubtful"])]
-            excluded.append(out_now.assign(team=r.team))
-            b = b[~b["inj_status"].isin(["Out", "Doubtful"])]
+            b["inj_status"] = b["player_id"].map(status).astype(object)
+            manual = b["player_id"].isin(raw.get("manual_out", ()))
+            b.loc[manual, "inj_status"] = "Out (you)"
+            is_out = b["inj_status"].isin(["Out", "Out (you)"])
+            excluded.append(b[is_out].assign(team=r.team))
+            b = b[~is_out]
             b = b.assign(game_id=r.game_id, season=cur, week=r.week, team=r.team, offense_pct=np.nan,
                          upcoming=True, **{c: 0.0 for c in stats_cols})
             rows.append(b)
@@ -236,6 +245,49 @@ def _team_context(G: pd.DataFrame) -> pd.DataFrame:
 # ==========================================================================
 # receiving + rushing features
 # ==========================================================================
+def _redistribute(u: pd.DataFrame, k: float = 60) -> np.ndarray:
+    """Target share after accounting for who is missing.
+
+    For each team-game: the team's usual target share by position (earlier games
+    this season, shrunk toward league) minus what the active players at that
+    position normally get = targets 'missing' at that position. Half of that
+    (alpha) goes to active teammates at the same position, in proportion to their
+    shares; half of any remaining shortfall is spread across everyone. If the
+    actives already add up to more than the team total, all are scaled down.
+    Backtest (model/redistribute.py): beats proportional-to-everyone by ~2% in
+    games with a teammate out."""
+    a = REC["alpha"]
+    tg = (u.assign(pos=u["pos"].fillna("RB"))
+          .groupby(["season", "week", "game_id", "team", "pos"])["targets"].sum().unstack("pos").fillna(0))
+    tg = tg.join(u.groupby(["season", "week", "game_id", "team"])["team_targets"].first()).reset_index()
+    tg = tg.sort_values(["team", "season", "week"])
+    for p in ["WR", "TE", "RB"]:
+        if p not in tg:
+            tg[p] = 0.0
+    lg = {p: tg[p].sum() / max(tg["team_targets"].sum(), 1) for p in ["WR", "TE", "RB"]}
+    gg = tg.groupby(["team", "season"])
+    ctt = gg["team_targets"].cumsum() - tg["team_targets"]
+    S = []
+    for p in ["WR", "TE", "RB"]:
+        cum = gg[p].cumsum() - tg[p]
+        S.append(tg[["game_id", "team"]].assign(pos=p, S_pos=((cum + k * lg[p]) / (ctt + k)).to_numpy()))
+    S = pd.concat(S)
+    x = u[["game_id", "team", "pos", "est_tshare"]].merge(S, on=["game_id", "team", "pos"], how="left")
+    x["S_pos"] = x["S_pos"].fillna(0)
+    x["act_pos"] = x.groupby(["game_id", "team", "pos"])["est_tshare"].transform("sum")
+    x["act_tot"] = x.groupby(["game_id", "team"])["est_tshare"].transform("sum")
+    x["miss_pos"] = (x["S_pos"] - x["act_pos"]).clip(lower=0)
+    per_pos = x.drop_duplicates(["game_id", "team", "pos"]).groupby(["game_id", "team"])["miss_pos"].sum()
+    x = x.merge(per_pos.rename("miss_pos_sum").reset_index(), on=["game_id", "team"], how="left")
+    miss_tot = (0.995 - x["act_tot"]).clip(lower=0)
+    rest = (miss_tot - x["miss_pos_sum"]).clip(lower=0)
+    over = (x["act_tot"] - 0.995).clip(lower=0)
+    sh = x["est_tshare"]
+    out = (sh + a * (x["miss_pos"] * sh / x["act_pos"].replace(0, np.nan)).fillna(0)
+           + a * rest * sh / x["act_tot"] - a * sh * over / x["act_tot"])
+    return out.to_numpy()
+
+
 def _player_features(u: pd.DataFrame, T: pd.DataFrame) -> pd.DataFrame:
     u = u.sort_values(["player_id", "season", "week"]).reset_index(drop=True)
     g = u.groupby(["player_id", "season"])
@@ -269,8 +321,7 @@ def _player_features(u: pd.DataFrame, T: pd.DataFrame) -> pd.DataFrame:
     prior = p_share.fillna(pd.Series(fb, index=u.index))
     kp = np.where(has, REC["k_share"], 25)
     u["est_tshare"] = (u["d_tgt"] + kp * prior) / (u["d_tt"] + kp)
-    tot = u.groupby(["game_id", "team"])["est_tshare"].transform("sum")
-    u["tshare_adj"] = u["est_tshare"] * (1 + REC["alpha"] * (0.995 / tot - 1))
+    u["tshare_adj"] = _redistribute(u)
     w = REC["w_prior"]
     n = u["c_targets"] + w * u["p_tgt"]
     u["est_cr"] = (u["c_receptions"] + w * u["p_rec"] + REC["k_cr"] * u["pos"].map(POS_CR)) / (n + REC["k_cr"])
@@ -444,8 +495,9 @@ def distribution(spec: dict, m: float, count: bool, hi: float | None = None):
 # ==========================================================================
 # top-level
 # ==========================================================================
-def build(seasons: list[int], include_upcoming: bool) -> dict:
-    raw = load_raw(seasons, current=max(seasons) if include_upcoming else None)
+def build(seasons: list[int], include_upcoming: bool, manual_out: tuple = (), raw: dict | None = None) -> dict:
+    raw = raw or load_raw(seasons, current=max(seasons) if include_upcoming else None)
+    raw = {**raw, "manual_out": tuple(manual_out)}
     u, G = _universe(raw, include_upcoming)
     T = _team_context(G)
     P = _player_features(u, T)
@@ -453,11 +505,12 @@ def build(seasons: list[int], include_upcoming: bool) -> dict:
     return {"players": P, "qbs": Q, "games": G, "T": T, "excluded": raw.get("excluded", pd.DataFrame())}
 
 
-def project(seasons: list[int]) -> dict:
-    """Projections + distribution specs for each team's next game."""
+def project(seasons: list[int], manual_out: tuple = (), raw: dict | None = None) -> dict:
+    """Projections + distribution specs for each team's next game.
+    manual_out: player ids you've marked as ruled out (on top of the injury report)."""
     coefs = json.loads(COEFS.read_text())
     dist = json.loads(DIST.read_text())
-    B = build(seasons, include_upcoming=True)
+    B = build(seasons, include_upcoming=True, manual_out=manual_out, raw=raw)
     P, Q = B["players"], B["qbs"]
     up = P[P["upcoming"]].copy()
     for mk in ["receptions", "rec_yards", "carries", "rush_yards"]:
