@@ -1,4 +1,4 @@
-# NFL Dashboard: Props, Defense vs Role, QB Rushing — v1.3.1
+# NFL Dashboard: Props, Matchups, QB Rushing — v1.4
 
 Personal dashboard for fantasy and props. Shows what each defense allows to an
 offense's WR1 / WR2 / WR3 / TE / RB, with this week's matchups ranked by edge.
@@ -20,7 +20,13 @@ it for 6 hours. Nothing to schedule or maintain.
 Optional: in the app's Streamlit settings → *Sharing*, restrict viewers to
 your email.
 
-## Props tab (v1.3)
+## Layout (v1.4)
+
+Three tabs, each with its own filters at the top (no sidebar):
+**Props** · **Matchups** (This week / Defense grid / Defense game log / Team roles)
+· **QB rushing**.
+
+## Props tab
 
 Projections for **receptions, receiving yards, rush attempts, rushing yards and
 passing yards** for every team's next game, compared with sportsbook lines.
@@ -30,8 +36,20 @@ Columns: player · team · opponent · season and last-4 averages · usage drive
 **Projection** (average) · **Fair line** (where the model sees 50/50) · line and
 odds · **P(over)** · **Book P(over)** (margin removed) · **Edge** (green at ≥5
 pts) · **EV** per $1 · flags (injury status, <4 games, new team, teammates out).
-Pick a player below the table for how the projection was built, the outcome
-distribution with the line marked, and his game log.
+**Click a row** to open the player's window: how the projection was built, the
+outcome distribution with the line marked, what the opponent allows by role, and
+his season game log.
+
+- **Pos** is the player's role this week among teammates expected to play
+  (WR1–WR4, TE1–TE2, RB1–RB2, QB). Ruling players out re-ranks roles.
+- **Opp allows** (receiving) = receptions or yards per game the opponent has
+  allowed to his role this season, with rank among 32 defenses. Toggle
+  **Opponent by role** to see WR1–WR4, TE1–TE2 and RB side by side. This is
+  context only: in backtests the role funnel didn't improve projections.
+- **Rushing markets include starting QBs** (projected 2.5+ carries or with a
+  line). QB rushing model: his carries per start (this season blended with his
+  last two), × his YPC, adjusted for spread/total; backtested in
+  `model/qb_rush.py` (beats his season average by ~6–7%).
 
 ### Odds API setup (one time)
 1. Get a key at the-odds-api.com (free plan = 500 credits/month).

@@ -34,6 +34,7 @@ DIST = HERE / "model" / "dist_specs.json"
 REC = dict(decay=0.8, k_share=50, k_cr=80, k_ypt=120, w_prior=0.5, alpha=0.5)
 RUSH = dict(decay=0.7, k_share=10, k_ypc=40, w_prior=0.5, alpha=0.5)
 PASS = dict(decay_team=0.8, k_team=4, k_ypa=100, w_prior=0.5)
+QBR = dict(k_games=1, k_ypc=20)
 # league constants from 2021-2022 (pre-backtest), used as shrinkage targets
 POS_CR = {"WR": 0.632, "TE": 0.688, "RB": 0.772}
 POS_YPT = {"WR": 7.91, "TE": 7.26, "RB": 5.74}
@@ -347,7 +348,39 @@ def _player_features(u: pd.DataFrame, T: pd.DataFrame) -> pd.DataFrame:
     u["E_car0"] = u["cshare_adj"] * u["est_team_cpg"]
     u["tot_c"] = u["total_line"] - 44.5
     u["new_team"] = u["p_team"].notna() & (u["p_team"] != u["team"]) & (u["c_g"] < 4)
+    u["role"] = assign_roles(u)
     return u
+
+
+ROLE_ORDER = ["WR1", "WR2", "WR3", "WR4", "TE1", "TE2", "RB"]
+
+
+def assign_roles(u: pd.DataFrame) -> pd.Series:
+    """Pre-game role within each team-game among players expected to play:
+    WR1-WR4 (4th+ = WR4) and TE1-TE2 by target share; RB1/RB2 by carry share.
+    Upcoming games use shares after ruled-out players are removed, so roles move up."""
+    rk_t = u.groupby(["game_id", "team", "pos"])["tshare_adj"].rank(ascending=False, method="first")
+    rk_c = u.groupby(["game_id", "team", "pos"])["cshare_adj"].rank(ascending=False, method="first")
+    return pd.Series(np.select(
+        [u["pos"] == "WR", u["pos"] == "TE", u["pos"] == "RB"],
+        ["WR" + rk_t.clip(upper=4).fillna(4).astype(int).astype(str),
+         "TE" + rk_t.clip(upper=2).fillna(2).astype(int).astype(str),
+         "RB" + rk_c.clip(upper=2).fillna(2).astype(int).astype(str)], default=u["pos"].fillna("")), index=u.index)
+
+
+def defense_by_role(P: pd.DataFrame, G: pd.DataFrame, season: int) -> pd.DataFrame:
+    """Per defense, this season so far: targets / receptions / yards allowed per game
+    to each role (WR1-4, TE1-2, RB = all backs), plus rank (1 = allows the most)."""
+    h = P[(~P["upcoming"]) & (P["season"] == season)].copy()
+    h["drole"] = np.where(h["role"].str.startswith("RB"), "RB", h["role"])
+    agg = h.groupby(["opp", "drole"])[["targets", "receptions", "receiving_yards"]].sum()
+    n = G[G["played"] & (G["season"] == season)].groupby("opp").size()  # games each defense has played
+    agg = agg.div(n, level="opp", axis=0).unstack("drole").fillna(0)
+    agg = agg.reindex(columns=pd.MultiIndex.from_product([["targets", "receptions", "receiving_yards"], ROLE_ORDER]),
+                      fill_value=0)
+    ranks = agg.rank(ascending=False, method="min")
+    ranks.columns = pd.MultiIndex.from_tuples([(f"rank_{a}", b) for a, b in ranks.columns])
+    return pd.concat([agg, ranks], axis=1)
 
 
 # ==========================================================================
@@ -409,6 +442,39 @@ def _qb_features(raw: dict, G: pd.DataFrame, T: pd.DataFrame) -> pd.DataFrame:
     Q = Q.sort_values(["qb_id", "season", "week"]).reset_index(drop=True)
     Q["l4_pass_yds"] = Q.groupby(["qb_id", "season"])["passing_yards"].transform(
         lambda x: x.shift(1).rolling(4, min_periods=1).mean())
+
+    # ---- QB rushing (backtest model/qb_rush.py): his carries per start this season,
+    # shrunk toward his last two seasons (worth up to 8 games), x shrunk QB YPC
+    qr = ps[ps["position"] == "QB"][["player_id", "game_id", "season", "carries", "rushing_yards"]]
+    Q = Q.merge(qr.drop(columns="season").rename(columns={"player_id": "qb_id"}), on=["qb_id", "game_id"], how="left")
+    Q[["carries", "rushing_yards"]] = Q[["carries", "rushing_yards"]].fillna(0)
+    gq = Q.groupby(["qb_id", "season"])
+    Q["c_qcar"] = gq["carries"].cumsum() - Q["carries"]
+    Q["c_qyds"] = gq["rushing_yards"].cumsum() - Q["rushing_yards"]
+    Q["c_qg"] = gq.cumcount()
+    tq = qr.groupby(["player_id", "season"]).agg(g=("game_id", "size"), car=("carries", "sum"),
+                                                 yds=("rushing_yards", "sum")).reset_index()
+    for k in (1, 2):
+        t = tq.assign(season=tq["season"] + k).rename(columns={"player_id": "qb_id", "g": f"qg{k}", "car": f"qc{k}", "yds": f"qy{k}"})
+        Q = Q.merge(t, on=["qb_id", "season"], how="left")
+    for c in ["qg1", "qc1", "qy1", "qg2", "qc2", "qy2"]:
+        Q[c] = Q[c].fillna(0)
+    pl_ = Q[Q["played"]]
+    lg_cpg = pl_.groupby("season")["carries"].mean()
+    lg_ypc = pl_.groupby("season")["rushing_yards"].sum() / pl_.groupby("season")["carries"].sum()
+    lgc = Q["season"].map(lg_cpg.shift(1)).fillna(lg_cpg.mean() if len(lg_cpg) else 4.0)
+    lgy = Q["season"].map(lg_ypc.shift(1)).fillna(lg_ypc.mean() if len(lg_ypc) else 4.5)
+    pg_ = Q["qg1"] + 0.5 * Q["qg2"]
+    prior = ((Q["qc1"] + 0.5 * Q["qc2"]) / pg_.replace(0, np.nan)).where(Q["qg1"] + Q["qg2"] >= 6).fillna(lgc)
+    pw = pg_.clip(upper=8)
+    Q["E_qcar"] = (Q["c_qcar"] + (QBR["k_games"] + pw) * prior) / (Q["c_qg"] + QBR["k_games"] + pw)
+    Q["est_qypc"] = ((Q["c_qyds"] + Q["qy1"] + 0.5 * Q["qy2"] + QBR["k_ypc"] * lgy)
+                     / (Q["c_qcar"] + Q["qc1"] + 0.5 * Q["qc2"] + QBR["k_ypc"]))
+    Q["qcar_pg_season"] = Q["c_qcar"] / Q["c_qg"].replace(0, np.nan)
+    Q["qrush_pg_season"] = Q["c_qyds"] / Q["c_qg"].replace(0, np.nan)
+    gq = Q.groupby(["qb_id", "season"])
+    Q["l4_qcar"] = gq["carries"].transform(lambda x: x.shift(1).rolling(4, min_periods=1).mean())
+    Q["l4_qrush"] = gq["rushing_yards"].transform(lambda x: x.shift(1).rolling(4, min_periods=1).mean())
     return Q
 
 
@@ -430,6 +496,8 @@ SPEC = {  # market: (base column(s), multiplier columns)
     "carries": (["E_car0"], ["team_spread", "tot_c", "opp_car_ratio"]),
     "rush_yards": (["E_car0", "est_ypc"], ["team_spread", "tot_c", "opp_car_ratio", "opp_ypc_ratio"]),
     "pass_yards": (["E_pass0"], ["team_spread", "tot_c", "opp_att_ratio", "opp_ypa_ratio"]),
+    "qb_carries": (["E_qcar"], ["team_spread", "tot_c"]),
+    "qb_rush_yards": (["E_qcar", "est_qypc"], ["team_spread", "tot_c"]),
 }
 
 
@@ -517,6 +585,9 @@ def project(seasons: list[int], manual_out: tuple = (), raw: dict | None = None)
         up["mu_" + mk] = apply(up, mk, coefs[mk])
     uq = Q[~Q["played"]].copy()
     uq["mu_pass_yards"] = apply(uq, "pass_yards", coefs["pass_yards"])
+    uq["mu_carries"] = apply(uq, "qb_carries", coefs["qb_carries"]) if "qb_carries" in coefs else uq["E_qcar"]
+    uq["mu_rush_yards"] = (apply(uq, "qb_rush_yards", coefs["qb_rush_yards"]) if "qb_rush_yards" in coefs
+                           else uq["E_qcar"] * uq["est_qypc"])
     # teammates ruled out (Out/Doubtful) who carried real volume this season
     ex = B["excluded"]
     if len(ex):
@@ -529,5 +600,9 @@ def project(seasons: list[int], manual_out: tuple = (), raw: dict | None = None)
         ex = ex[(ex["tshare"] >= 0.12) | (ex["cshare"] >= 0.25)]
     else:
         ex = pd.DataFrame(columns=["player_id", "name", "position", "inj_status", "team", "tshare", "cshare"])
+    cur = P["season"].max()
+    # QB rushing allowed per game by each defense this season (starters)
+    qh = Q[Q["played"] & (Q["season"] == cur)]
+    qdef = qh.groupby("opp").agg(qb_car_pg=("carries", "mean"), qb_rush_pg=("rushing_yards", "mean"))
     return {"players": up, "qbs": uq, "dist": dist, "history": P, "qb_history": Q, "games": B["games"],
-            "T": B["T"], "out": ex}
+            "T": B["T"], "out": ex, "def_role": defense_by_role(P, B["games"], cur), "qb_def": qdef}
