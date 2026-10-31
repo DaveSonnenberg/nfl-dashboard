@@ -414,7 +414,8 @@ def render():
     event = st.dataframe(sty, hide_index=True, width="stretch", height=640, key=f"pm_table_{market}",
                          on_select="rerun", selection_mode="single-row")
     st.caption(
-        "Click a row to open the player's window (projection build-up, outcome chart, season game log). "
+        "To open a player's window (projection build-up, outcome chart, season game log), tick the checkbox at the "
+        "far left of his row or pick him under the table. "
         "**Pos** = role this week among teammates expected to play (re-ranks when you rule players out). "
         "**Opp allows** = per game to his role this season, rank among 32 defenses (1st = allows the most); "
         "for rushing, rank among this week's opponents. **Fair line** = where the model sees 50/50 (below the "
@@ -422,10 +423,23 @@ def render():
         f"on the better side, green at ≥ {EDGE_MIN:.0%}. **EV** = expected return per $1. "
         "Opponent-by-role numbers are context: in backtests they didn't improve projections.")
 
+    # Open the player window: (a) tick the checkbox at the left edge of a row, or
+    # (b) pick a name below. Either way it opens once per new pick.
     sel = event.selection.rows if event is not None and hasattr(event, "selection") else []
+    names = df["Player"].tolist()
+    pc1, pc2 = st.columns([3, 5])
+    picked_name = pc1.selectbox("Open player window", ["—"] + names, key=f"pm_pick_{market}",
+                                help="Or tick the checkbox at the far left of any row in the table.")
+    if pc2.button("Open", key=f"pm_open_{market}") and picked_name != "—":
+        st.session_state["pm_last_open"] = None  # force re-open of the same player
+    target = None
     if sel:
-        i = sel[0]
-        token = (market, df.loc[i, "player_id"])
+        target = ("row", sel[0])
+    elif picked_name != "—":
+        target = ("pick", names.index(picked_name))
+    if target is not None:
+        i = target[1]
+        token = (market, target[0], df.loc[i, "player_id"])
         if st.session_state.get("pm_last_open") != token:
             st.session_state["pm_last_open"] = token
             _player_window(R, market, df.loc[i].to_dict())
