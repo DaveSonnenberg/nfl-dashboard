@@ -35,6 +35,10 @@ REC = dict(decay=0.8, k_share=50, k_cr=80, k_ypt=120, w_prior=0.5, alpha=0.5)
 RUSH = dict(decay=0.7, k_share=10, k_ypc=40, w_prior=0.5, alpha=0.5)
 PASS = dict(decay_team=0.8, k_team=4, k_ypa=100, w_prior=0.5)
 QBR = dict(k_games=1, k_ypc=20)
+# Players listed Questionable who play produce less than projected (2023-2026, receivers/RBs
+# with prop-level usage: receptions x0.90, rec yds x0.92, carries x0.90, rush yds x0.88;
+# 95% intervals exclude zero). QBs showed no effect (n=33). Applied to upcoming games only.
+QUESTIONABLE_MULT = {"receptions": 0.91, "rec_yards": 0.92, "carries": 0.90, "rush_yards": 0.89}
 # league constants from 2021-2022 (pre-backtest), used as shrinkage targets
 POS_CR = {"WR": 0.632, "TE": 0.688, "RB": 0.772}
 POS_YPT = {"WR": 7.91, "TE": 7.26, "RB": 5.74}
@@ -581,8 +585,9 @@ def project(seasons: list[int], manual_out: tuple = (), raw: dict | None = None)
     B = build(seasons, include_upcoming=True, manual_out=manual_out, raw=raw)
     P, Q = B["players"], B["qbs"]
     up = P[P["upcoming"]].copy()
+    q = up["inj_status"].eq("Questionable").to_numpy()
     for mk in ["receptions", "rec_yards", "carries", "rush_yards"]:
-        up["mu_" + mk] = apply(up, mk, coefs[mk])
+        up["mu_" + mk] = apply(up, mk, coefs[mk]) * np.where(q, QUESTIONABLE_MULT[mk], 1.0)
     uq = Q[~Q["played"]].copy()
     uq["mu_pass_yards"] = apply(uq, "pass_yards", coefs["pass_yards"])
     uq["mu_carries"] = apply(uq, "qb_carries", coefs["qb_carries"]) if "qb_carries" in coefs else uq["E_qcar"]
