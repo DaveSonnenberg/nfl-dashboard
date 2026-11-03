@@ -490,7 +490,10 @@ def _mult(df, coefs, cols):
     z = np.zeros(len(df))
     for c, b in zip(cols, coefs):
         x = df[c].to_numpy(float)
-        z += b * (np.log(x) if c.endswith("_ratio") else x)
+        if c.endswith("_ratio"):  # missing/zero ratio -> neutral (1.0)
+            z += b * np.log(np.where(np.isfinite(x) & (x > 0), x, 1.0))
+        else:  # missing spread/total -> neutral (pick'em, 44.5 total)
+            z += b * np.where(np.isfinite(x), x, 0.0)
     return np.exp(z)
 
 
@@ -543,6 +546,8 @@ def p_over(spec: dict, m, L):
 
 def fair_line(spec: dict, m: float, count: bool) -> float:
     """Line (x.5) closest to a 50/50 split."""
+    if not np.isfinite(m) or m <= 0:
+        return np.nan
     if count:
         grid = np.arange(-0.5, max(m * 3, 6) + 1, 1.0)
     else:
