@@ -13,6 +13,7 @@ import pandas as pd
 import streamlit as st
 
 import nfl_data as d
+import game_ratings
 import props_tab
 import qb_tab
 
@@ -61,22 +62,29 @@ SEASONS = [CS, CS - 1, CS - 2, CS - 3]
 # Matchups (defense vs role)
 # ==========================================================================
 def render_matchups():
-    f1, f2, f3, f4, f5 = st.columns([1, 1, 2, 2, 3])
+    f1, f2, _ = st.columns([1, 1, 7], vertical_alignment="bottom")
     season = f1.selectbox("Season", SEASONS, key="mx_season")
     include_post = f2.toggle("Playoffs", value=False, key="mx_post")
-    stat = f3.selectbox("Stat", list(STAT_LABELS), format_func=STAT_LABELS.get, key="mx_stat")
-    mode = f4.selectbox("Show", ["Per game", "vs league avg", "vs league avg (%)"], key="mx_mode")
 
     overrides = d.load_overrides(OVERRIDES_PATH)
     season_ov = overrides[overrides["season"].isin(["", str(season)])] if len(overrides) else overrides
     raw = get_raw(season, include_post)
     pg = get_player_games(season, include_post, season_ov)
+
+    tab_games, tab_grid, tab_log, tab_roles = st.tabs(
+        ["Games", "Defense grid", "Defense game log", "Team roles (audit)"])
+    with tab_games:
+        game_ratings.render(season)
     if pg.empty:
         st.warning("No games yet for this season.")
         return
     max_week = int(pg["week"].max())
-    weeks = f5.slider("Weeks", 1, max_week, (1, max_week), key="mx_weeks",
-                      help="Drag the left handle to see only recent form (e.g. last 4 weeks).")
+    with tab_grid:
+        f3, f4, f5 = st.columns([2, 2, 3])
+        stat = f3.selectbox("Stat", list(STAT_LABELS), format_func=STAT_LABELS.get, key="mx_stat")
+        mode = f4.selectbox("Show", ["Per game", "vs league avg", "vs league avg (%)"], key="mx_mode")
+        weeks = f5.slider("Weeks", 1, max_week, (1, max_week), key="mx_weeks",
+                          help="Drag the left handle to see only recent form (e.g. last 4 weeks).")
 
     dvr = d.defense_vs_role(pg, weeks)
     lg = d.league_avg(dvr)
@@ -86,8 +94,7 @@ def render_matchups():
     dvr["pct"] = dvr[col] / dvr["avg"] - 1
     value = {"Per game": col, "vs league avg": "diff", "vs league avg (%)": "pct"}[mode]
     nxt = d.next_opponents(raw["schedules"])
-    next_week = dict(zip(nxt["team"], nxt["next_week"]))
-    st.caption(
+    caption = (
         f"{season} · weeks {weeks[0]}–{weeks[1]} · {STAT_LABELS[stat]} allowed per game. "
         "WR1/2/3 = each offense's receivers ranked by target share entering that game. "
         "Darker green = defense allows more. Always check **G** (games): under ~4, treat colors as noise.")
@@ -110,43 +117,8 @@ def render_matchups():
             sty = sty.background_gradient(cmap="RdYlGn", subset=[c], vmin=-lim, vmax=lim)
         return sty
 
-    tab_week, tab_grid, tab_log, tab_roles = st.tabs(
-        ["This week", "Defense grid", "Defense game log", "Team roles (audit)"])
-
-    with tab_week:
-        if nxt.empty:
-            st.info("No upcoming regular-season games.")
-        else:
-            roles_now = d.current_roles(pg, season_ov, next_week)
-            m = roles_now.merge(nxt, on="team", how="inner")
-            m["opp_def"] = m["next_opp"].str.lstrip("@")
-            m = m.merge(dvr[["defteam", "role", col, "avg", "diff", "pct", "games"]],
-                        left_on=["opp_def", "role"], right_on=["defteam", "role"], how="left")
-            wk = int(m["next_week"].mode().iloc[0])
-            c1, c2 = st.columns([2, 3])
-            role_pick = c1.multiselect("Roles", d.ROLE_ORDER, default=d.ROLE_ORDER, key="mx_roles")
-            team_pick = c2.multiselect("Teams (blank = all)", sorted(m["team"].unique()), key="mx_teams")
-            m = m[m["role"].isin(role_pick)]
-            if team_pick:
-                m = m[m["team"].isin(team_pick)]
-            out = pd.DataFrame({
-                "Team": m["team"], "Opp": m["next_opp"], "Role": m["role"], "Player": m["player"],
-                "Tgt share": m["share"], "Opp allows": m[col], "Lg avg": m["avg"],
-                "Edge": m[value] if mode != "Per game" else m["diff"], "G": m["games"],
-            }).sort_values("Edge", ascending=False)
-            st.subheader(f"Week {wk}: who has the soft matchup")
-            st.caption("Each team's next game. Roles are projected from target share through each team's last "
-                       "game; anyone who missed that game is not listed. Edge = what the opponent allows to this "
-                       "role minus league average.")
-            edge_fmt = (lambda v: f"{v:+.0%}") if mode == "vs league avg (%)" else (lambda v: f"{v:+.1f}")
-            lim = out["Edge"].abs().max() or 1
-            st.dataframe(
-                out.style.format({"Tgt share": "{:.0%}", "Opp allows": "{:.1f}", "Lg avg": "{:.1f}",
-                                  "Edge": edge_fmt, "G": "{:.0f}"}, na_rep="")
-                   .background_gradient(cmap="RdYlGn", subset=["Edge"], vmin=-lim, vmax=lim),
-                hide_index=True, width="stretch", height=620)
-
     with tab_grid:
+        st.caption(caption)
         grid = dvr.pivot(index="defteam", columns="role", values=value)[d.ROLE_ORDER]
         grid.insert(0, "G", dvr.groupby("defteam")["games"].first())
         grid = grid.join(nxt.set_index("team")[["next_opp"]].rename(columns={"next_opp": "Next"}))
@@ -165,7 +137,8 @@ def render_matchups():
         for c, role in zip(cols, d.ROLE_ORDER):
             r = sub.loc[role]
             c.metric(role, f"{r[col]:.1f}", f"{r['diff']:+.1f} vs avg")
-        st.caption(f"{STAT_LABELS[stat]} per game allowed · {int(sub['games'].iloc[0])} games. "
+        st.caption(f"{STAT_LABELS[stat]} per game allowed · {int(sub['games'].iloc[0])} games "
+                   f"(stat and weeks follow the Defense grid filters). "
                    "Each line reads Rec/Targets, yards.")
         st.dataframe(d.defense_game_log(pg, dteam, weeks), hide_index=True, width="stretch")
 
