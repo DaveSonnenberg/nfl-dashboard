@@ -374,7 +374,7 @@ def assign_roles(u: pd.DataFrame) -> pd.Series:
 
 def defense_by_role(P: pd.DataFrame, G: pd.DataFrame, season: int) -> pd.DataFrame:
     """Per defense, this season so far: targets / receptions / yards allowed per game
-    to each role (WR1-4, TE1-2, RB = all backs), plus rank (1 = allows the most)."""
+    to each role (WR1-4, TE1-2, RB = all backs), plus rank (1 = allows the least, i.e. toughest)."""
     h = P[(~P["upcoming"]) & (P["season"] == season)].copy()
     h["drole"] = np.where(h["role"].str.startswith("RB"), "RB", h["role"])
     agg = h.groupby(["opp", "drole"])[["targets", "receptions", "receiving_yards"]].sum()
@@ -382,7 +382,7 @@ def defense_by_role(P: pd.DataFrame, G: pd.DataFrame, season: int) -> pd.DataFra
     agg = agg.div(n, level="opp", axis=0).unstack("drole").fillna(0)
     agg = agg.reindex(columns=pd.MultiIndex.from_product([["targets", "receptions", "receiving_yards"], ROLE_ORDER]),
                       fill_value=0)
-    ranks = agg.rank(ascending=False, method="min")
+    ranks = agg.rank(ascending=True, method="min")
     ranks.columns = pd.MultiIndex.from_tuples([(f"rank_{a}", b) for a, b in ranks.columns])
     return pd.concat([agg, ranks], axis=1)
 

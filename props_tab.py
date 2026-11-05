@@ -221,7 +221,7 @@ def _player_window(R: dict, market: str, r: dict):
         row = pd.DataFrame({"Per game": dr[stat].loc[r["opp"]].map(lambda v: f"{v:.1f}"),
                             "Rank": dr["rank_" + stat].loc[r["opp"]].map(_ordinal)}).T
         st.markdown(f"**{r['opp']} allows by role** ({'receptions' if stat == 'receptions' else 'receiving yards'}; "
-                    "rank 1st = allows the most)")
+                    "1st = toughest, 32nd = easiest)")
         st.dataframe(row, width="stretch")
 
     st.markdown("**This season**")
@@ -360,9 +360,19 @@ def render():
         df["opp_text"] = ""
     nr = df["opp_text"].isna() | (df["opp_text"] == "")
     if nr.any():
+        # rank against all 32 defenses this season (1st = allows the least), independent of any filter
+        G = R["games"]
+        g = G[G["played"] & (G["season"] == G["season"].max())]
+        stat_col = {"carries": "team_carries", "rush_yards": "team_rush_yds"}.get(market)
+        qcol = {"carries": "qb_car_pg", "rush_yards": "qb_rush_pg"}.get(market)
+        full = {"rb": g.groupby("opp")[stat_col].mean() if stat_col else None,
+                "qb": R["qb_def"][qcol] if qcol else None,
+                "pass": g.groupby("opp")["team_pyds"].mean()}
         for grp, idx in df[nr].groupby("opp_group").groups.items():
-            vals = df.loc[idx].groupby("opp")["opp_val"].first()
-            rk = df.loc[idx, "opp"].map(vals.rank(ascending=False, method="min"))
+            allv = full.get(grp)
+            if allv is None:
+                allv = df.loc[idx].groupby("opp")["opp_val"].first()
+            rk = df.loc[idx, "opp"].map(allv.rank(ascending=True, method="min"))
             df.loc[idx, "opp_text"] = [f"{v:.1f} {lab} ({_ordinal(k)})" if pd.notna(v) else "—"
                                        for v, lab, k in zip(df.loc[idx, "opp_val"], df.loc[idx, "opp_label"], rk)]
     home = R["games"].set_index(["game_id", "team"])["home"]
@@ -392,7 +402,8 @@ def render():
                   "carries": "RBs: carry share · YPC. QBs: carries/g · YPC", "rush_yards": "RBs: carry share · YPC. QBs: carries/g · YPC",
                   "pass_yards": "Attempts/g · yards per attempt"}[market]
     cc = {"Usage": st.column_config.TextColumn(help=usage_help),
-          "Opp allows": st.column_config.TextColumn(help="Per game to his role (rank, 1st = allows the most)"),
+          "Opp allows": st.column_config.TextColumn(help="Per game this season (rank of 32 defenses, 1st = toughest, 32nd = easiest). "
+                                                       "RB = all non-QB rushing."),
           "Last 4": st.column_config.NumberColumn(help="Per game, last 4 games played"),
           "Book P(over)": st.column_config.NumberColumn("Book", help="Book's P(over), margin removed"),
           "P(over)": st.column_config.NumberColumn("Model", help="Model P(over)"),
