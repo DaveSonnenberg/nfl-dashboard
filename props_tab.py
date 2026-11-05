@@ -76,7 +76,6 @@ def _market_frame(R: dict, market: str, force_ids: set | None = None) -> pd.Data
             "player_id": q["qb_id"], "Player": q["name"], "Pos": "QB", "team": q["team"], "opp": q["opp"],
             "game_id": q["game_id"], "season_pg": q["ypg_season"], "l4_pg": q["l4_pass_yds"],
             "Usage": q["att_pg_season"].map(lambda x: f"{x:.0f} att/g" if pd.notna(x) else "—")
-                     + " · proj " + (q["est_team_att"] * q["est_share"]).map(lambda x: f"{x:.0f} att")
                      + " · " + q["est_ypa"].map(lambda x: f"{x:.1f} YPA"),
             "opp_val": q["opp_pass_yds_pg"], "opp_label": "pass yds/g", "opp_group": "pass",
             "mu": q["mu_pass_yards"], "games": q["c_g"], "inj": None, "new_team": False,
@@ -95,14 +94,14 @@ def _market_frame(R: dict, market: str, force_ids: set | None = None) -> pd.Data
         vals = [dr[stat].loc[o, r] if (o in dr.index and r in ROLES) else np.nan for o, r in zip(up["opp"], roles)]
         rnks = [dr["rank_" + stat].loc[o, r] if (o in dr.index and r in ROLES) else np.nan for o, r in zip(up["opp"], roles)]
         unit = "rec/g" if stat == "receptions" else "yds/g"
-        opp_text = [f"{v:.1f} {unit} to {r}s ({_ordinal(k)})" if pd.notna(v) else "—"
+        opp_text = [f"{v:.1f} to {r}s ({_ordinal(k)})" if pd.notna(v) else "—"
                     for v, r, k in zip(vals, roles, rnks)]
         df = pd.DataFrame({
             "player_id": up["player_id"], "Player": up["name"], "Pos": up["role"], "team": up["team"],
             "opp": up["opp"], "game_id": up["game_id"],
             "season_pg": up["c_" + stat] / up["c_g"].replace(0, np.nan), "l4_pg": up["l4_" + stat],
-            "Usage": up["tshare_adj"].map(lambda x: f"{x:.0%} tgt share") + " · proj "
-                     + up["E_tgt"].map(lambda x: f"{x:.1f} tgts"),
+            "Usage": up["tshare_adj"].map(lambda x: f"{x:.0%}") + " · "
+                     + up["E_tgt"].map(lambda x: f"{x:.1f} tgt"),
             "opp_text": opp_text, "opp_val": vals, "opp_rank": rnks,
             "mu": up["mu_" + market], "games": up["c_g"], "inj": up["inj_status"], "new_team": up["new_team"],
             "team_spread": up["team_spread"], "total_line": up["total_line"], "dist_key": market, "kind": "skill",
@@ -116,9 +115,9 @@ def _market_frame(R: dict, market: str, force_ids: set | None = None) -> pd.Data
     rb_df = pd.DataFrame({
         "player_id": rb["player_id"], "Player": rb["name"], "Pos": rb["role"], "team": rb["team"], "opp": rb["opp"],
         "game_id": rb["game_id"], "season_pg": rb["c_" + stat] / rb["c_g"].replace(0, np.nan), "l4_pg": rb["l4_" + stat],
-        "Usage": rb["cshare_adj"].map(lambda x: f"{x:.0%} carry share") + " · " + rb["est_ypc"].map(lambda x: f"{x:.1f} YPC"),
+        "Usage": rb["cshare_adj"].map(lambda x: f"{x:.0%}") + " · " + rb["est_ypc"].map(lambda x: f"{x:.1f} YPC"),
         "opp_val": rb["opp_carries_pg" if stat == "carries" else "opp_rush_yds_pg"],
-        "opp_label": "RB carries/g" if stat == "carries" else "rush yds/g", "opp_group": "rb",
+        "opp_label": "to RBs", "opp_group": "rb",
         "mu": rb["mu_" + market], "games": rb["c_g"], "inj": rb["inj_status"], "new_team": rb["new_team"],
         "team_spread": rb["team_spread"], "total_line": rb["total_line"], "dist_key": market, "kind": "skill",
     })
@@ -130,10 +129,10 @@ def _market_frame(R: dict, market: str, force_ids: set | None = None) -> pd.Data
         "game_id": qq["game_id"],
         "season_pg": qq["qcar_pg_season"] if stat == "carries" else qq["qrush_pg_season"],
         "l4_pg": qq["l4_qcar"] if stat == "carries" else qq["l4_qrush"],
-        "Usage": qq["qcar_pg_season"].map(lambda x: f"{x:.1f} car/start" if pd.notna(x) else "—")
+        "Usage": qq["qcar_pg_season"].map(lambda x: f"{x:.1f} car/g" if pd.notna(x) else "—")
                  + " · " + qq["est_qypc"].map(lambda x: f"{x:.1f} YPC"),
         "opp_val": qq["opp"].map(qd["qb_car_pg" if stat == "carries" else "qb_rush_pg"]),
-        "opp_label": "QB carries/g" if stat == "carries" else "QB rush yds/g", "opp_group": "qb",
+        "opp_label": "to QBs", "opp_group": "qb",
         "mu": qq["mu_" + market], "games": qq["c_qg"], "inj": None, "new_team": False,
         "team_spread": qq["team_spread"], "total_line": qq["total_line"],
         "dist_key": "qb_carries" if stat == "carries" else "qb_rush_yards", "kind": "qb",
@@ -378,16 +377,19 @@ def render():
                                        for v, lab, k in zip(df.loc[idx, "opp_val"], df.loc[idx, "opp_label"], rk)]
     home = R["games"].set_index(["game_id", "team"])["home"]
     df["Opp"] = [("" if home.get((g, t), True) else "@") + o for g, t, o in zip(df["game_id"], df["team"], df["opp"])]
+    df["Game"] = [f"{t} {'@' if o.startswith('@') else 'v'} {o.lstrip('@')}" for t, o in zip(df["team"], df["Opp"])]
     df["Flags"] = [_flags(r, out_by_team) for r in df.to_dict("records")]
     df = df.sort_values(["edge", "mu"], ascending=[False, False], na_position="last").reset_index(drop=True)
 
     show = pd.DataFrame({
-        "Player": df["Player"], "Pos": df["Pos"], "Team": df["team"], "Opp": df["Opp"],
-        "Season /g": df["season_pg"], "Last 4 /g": df["l4_pg"], "Usage": df["Usage"], "Opp allows": df["opp_text"],
-        "Projection": df["mu"], "Fair line": df["fair"], "Line": df["line"],
-        "Over": df["over"], "Under": df["under"], "P(over)": df["p_over"], "Book P(over)": df["book_p_over"],
+        "Player": df["Player"], "Pos": df["Pos"], "Game": df["Game"],
+        "Season /g": df["season_pg"], "Last 4": df["l4_pg"], "Usage": df["Usage"], "Opp allows": df["opp_text"],
+        "Proj": df["mu"], "Line": df["line"], "P(over)": df["p_over"], "Book P(over)": df["book_p_over"],
         "Pick": df["side"], "Edge": df["edge"], "EV": df["ev"], "Flags": df["Flags"],
     })
+    for c in ["Line", "P(over)", "Book P(over)", "Edge", "EV"]:  # None -> NaN so blanks show as "—"
+        show[c] = pd.to_numeric(show[c], errors="coerce")
+    show["Pick"] = show["Pick"].where(show["Pick"].notna(), "—")
     if breakdown:
         dr = R["def_role"]
         stat = "receptions" if market == "receptions" else "receiving_yards"
@@ -404,22 +406,31 @@ def render():
         if pd.isna(v):
             return ""
         return "background-color: rgba(34,197,94,.35); font-weight:600" if v >= EDGE_MIN else ""
-    fmt = {"Season /g": "{:.1f}", "Last 4 /g": "{:.1f}", "Projection": "{:.1f}", "Fair line": "{:.1f}",
-           "Line": "{:.1f}", "Over": "{:+.0f}", "Under": "{:+.0f}", "P(over)": "{:.0%}", "Book P(over)": "{:.0%}",
+    fmt = {"Season /g": "{:.1f}", "Last 4": "{:.1f}", "Proj": "{:.1f}",
+           "Line": "{:.1f}", "P(over)": "{:.0%}", "Book P(over)": "{:.0%}",
            "Edge": "{:+.1%}", "EV": "{:+.1%}"}
     sty = show.style.format(fmt, na_rep="—").map(hl, subset=["Edge"])
     if breakdown:
         bcols = [f"vs {r}" for r in ROLES]
         sty = sty.format({c: "{:.1f}" for c in bcols}, na_rep="—").background_gradient(cmap="Greens", subset=bcols, axis=0)
+    usage_help = {"receptions": "Target share · projected targets", "rec_yards": "Target share · projected targets",
+                  "carries": "RBs: carry share · YPC. QBs: carries/g · YPC", "rush_yards": "RBs: carry share · YPC. QBs: carries/g · YPC",
+                  "pass_yards": "Attempts/g · yards per attempt"}[market]
+    cc = {"Usage": st.column_config.TextColumn(help=usage_help),
+          "Opp allows": st.column_config.TextColumn(help="Per game to his role (rank, 1st = allows the most)"),
+          "Last 4": st.column_config.NumberColumn(help="Per game, last 4 games played"),
+          "Book P(over)": st.column_config.NumberColumn("Book", help="Book's P(over), margin removed"),
+          "P(over)": st.column_config.NumberColumn("Model", help="Model P(over)"),
+          "Flags": st.column_config.TextColumn(width="small", help="Injury status, small sample, new team, teammates out")}
     event = st.dataframe(sty, hide_index=True, width="stretch", height=640, key=f"pm_table_{market}",
-                         on_select="rerun", selection_mode="single-row")
+                         column_config=cc, on_select="rerun", selection_mode="single-row")
     st.caption(
         "To open a player's window (projection build-up, outcome chart, season game log), tick the checkbox at the "
         "far left of his row or pick him under the table. "
         "**Pos** = role this week among teammates expected to play (re-ranks when you rule players out). "
         "**Opp allows** = per game to his role this season, rank among 32 defenses (1st = allows the most); "
-        "for rushing, rank among this week's opponents. **Fair line** = where the model sees 50/50 (below the "
-        "average for yards). **Book P(over)** = book price with its margin removed. **Edge** = model minus book "
+        "for rushing, rank among this week's opponents. **Model / Book** = P(over) from the model and from the book "
+        "price with its margin removed. Fair line and over/under prices are in the player window. **Edge** = model minus book "
         f"on the better side, green at ≥ {EDGE_MIN:.0%}. **EV** = expected return per $1. "
         "Opponent-by-role numbers are context: in backtests they didn't improve projections.")
 
