@@ -3,7 +3,6 @@ rush attempts, rushing yards (RBs + QBs) and passing yards."""
 from __future__ import annotations
 
 import os
-import time
 from datetime import date
 
 import altair as alt
@@ -289,22 +288,25 @@ def render():
     label = {r.player_id: f"{r.name} · {r.team} {r.pos}" for r in opts.itertuples(index=False)}
     auto = _projections(season, ())["out"]
     auto = auto[auto["inj_status"] == "Out"]
-    picked = st.multiselect(
-        "Ruled out this week", options=list(label), format_func=label.get, key="pm_out",
-        placeholder="Add players who won't play (official Out designations are applied automatically)",
-        help="Removes the player and shifts his usage to teammates (mostly the same position); "
-             "roles (WR1, WR2…) re-rank. Only mark players who are ruled out — questionable players stay in.")
-    st.caption("From the official injury report: " + (", ".join(f"{n} ({t})" for n, t in zip(auto["name"], auto["team"]))
-               if len(auto) else "no Out designations in nflverse yet for this week (they usually appear Friday night/Saturday)."))
+    # ---------------- one compact control row
+    c_mk, c_bk, c_tm, c_out, c_only, c_odds, c_ln = st.columns([2.2, 1.6, 1.8, 3.2, 1.3, 1.1, 0.9],
+                                                               vertical_alignment="bottom")
+    market = c_mk.selectbox("Market", list(pm.MARKETS), format_func=pm.MARKETS.get, key="pm_market")
+    official = ", ".join(f"{n} ({t})" for n, t in zip(auto["name"], auto["team"])) or "none posted yet"
+    picked = c_out.multiselect(
+        "Ruled out", options=list(label), format_func=label.get, key="pm_out", placeholder="Add players…",
+        help="Removes the player and shifts his usage to teammates; roles re-rank. Only mark players who are "
+             f"ruled out — questionable players stay in. Official Out (applied automatically): {official}.")
     R = _projections(season, tuple(sorted(picked)))
     out_by_team = R["out"].groupby("team")["name"].apply(list).to_dict() if len(R["out"]) else {}
 
     # ---------------- odds
     key = _api_key()
-    top = st.columns([2, 3])
     payload = od.cached()
     if key:
-        if top[0].button("Pull latest odds", help="Uses ~5 Odds API credits per game (~70–80 for a full week)."):
+        credits = (payload or {}).get("usage", {}).get("x-requests-remaining", "?")
+        if c_odds.button("Odds", icon=":material/refresh:", width="stretch",
+                         help=f"Pull latest props (~5 credits per game). Credits left: {credits}."):
             games = R["games"]
             nxt = games[games["game_id"].isin(R["players"]["game_id"]) & games["home"]]
             with st.spinner("Pulling player props…"):
@@ -312,15 +314,9 @@ def render():
                     payload = od.fetch(key, set(zip(nxt["team"], nxt["opp"])))
                 except Exception as e:
                     st.error(f"Odds pull failed: {e}")
-        if payload:
-            u = payload.get("usage", {})
-            top[1].caption(f"Odds pulled {time.strftime('%a %I:%M %p', time.localtime(payload['pulled_at']))} · "
-                           f"{payload.get('n_events', 0)} games · credits left: {u.get('x-requests-remaining', '?')}")
-        else:
-            top[1].caption("No odds pulled in the last 12 hours.")
     else:
-        top[0].info("No Odds API key set. Add `ODDS_API_KEY` in the app's Secrets to pull lines "
-                    "automatically. You can still enter lines by hand below.")
+        c_odds.button("Odds", icon=":material/refresh:", width="stretch", disabled=True,
+                      help="No ODDS_API_KEY in the app's Secrets. Enter lines by hand under ✎.")
 
     wide = od.parse(payload) if payload else pd.DataFrame()
     books = ["Consensus"] + (sorted(wide["book"].dropna().unique()) if len(wide) else [])
@@ -329,16 +325,10 @@ def render():
     if len(wide):
         wide = od.match_players(wide, every, pm.norm_name)
 
-    # ---------------- controls
-    c1, c2, c3, c4 = st.columns([4, 2, 2, 2])
-    market = c1.radio("Market", list(pm.MARKETS), format_func=pm.MARKETS.get, horizontal=True, key="pm_market")
-    book = c2.selectbox("Book", books, key="pm_book")
-    teams = c3.multiselect("Teams", sorted(R["players"]["team"].unique()), key="pm_teams")
-    only_lines = c4.toggle("Only players with a line", value=False, key="pm_only")
-    breakdown = False
-    if market in ("receptions", "rec_yards"):
-        breakdown = c4.toggle("Opponent by role", value=False, key="pm_breakdown",
-                              help="Add what each opponent allows per game to WR1–WR4, TE1–TE2 and RBs.")
+    book = c_bk.selectbox("Book", books, key="pm_book")
+    teams = c_tm.multiselect("Teams", sorted(R["players"]["team"].unique()), key="pm_teams", placeholder="All")
+    only_lines = c_only.toggle("Lined only", value=False, key="pm_only", help="Only players with a line")
+    lines_box = c_ln.popover("✎", help="Enter or override lines by hand", width="stretch")
     lines = od.consensus(wide, book) if len(wide) else pd.DataFrame()
 
     force = set(lines.loc[lines["market"] == market, "player_id"]) if len(lines) else set()
@@ -390,18 +380,6 @@ def render():
     for c in ["Line", "P(over)", "Book P(over)", "Edge", "EV"]:  # None -> NaN so blanks show as "—"
         show[c] = pd.to_numeric(show[c], errors="coerce")
     show["Pick"] = show["Pick"].where(show["Pick"].notna(), "—")
-    if breakdown:
-        dr = R["def_role"]
-        stat = "receptions" if market == "receptions" else "receiving_yards"
-        for role in ROLES:
-            show[f"vs {role}"] = df["opp"].map(dr[stat][role]) if role in dr[stat] else np.nan
-        cols = list(show.columns)
-        # put the breakdown right after "Opp allows"
-        bcols = [f"vs {r}" for r in ROLES]
-        rest = [c for c in cols if c not in bcols]
-        i = rest.index("Opp allows") + 1
-        show = show[rest[:i] + bcols + rest[i:]]
-
     def hl(v):
         if pd.isna(v):
             return ""
@@ -410,9 +388,6 @@ def render():
            "Line": "{:.1f}", "P(over)": "{:.0%}", "Book P(over)": "{:.0%}",
            "Edge": "{:+.1%}", "EV": "{:+.1%}"}
     sty = show.style.format(fmt, na_rep="—").map(hl, subset=["Edge"])
-    if breakdown:
-        bcols = [f"vs {r}" for r in ROLES]
-        sty = sty.format({c: "{:.1f}" for c in bcols}, na_rep="—").background_gradient(cmap="Greens", subset=bcols, axis=0)
     usage_help = {"receptions": "Target share · projected targets", "rec_yards": "Target share · projected targets",
                   "carries": "RBs: carry share · YPC. QBs: carries/g · YPC", "rush_yards": "RBs: carry share · YPC. QBs: carries/g · YPC",
                   "pass_yards": "Attempts/g · yards per attempt"}[market]
@@ -422,47 +397,24 @@ def render():
           "Book P(over)": st.column_config.NumberColumn("Book", help="Book's P(over), margin removed"),
           "P(over)": st.column_config.NumberColumn("Model", help="Model P(over)"),
           "Flags": st.column_config.TextColumn(width="small", help="Injury status, small sample, new team, teammates out")}
-    event = st.dataframe(sty, hide_index=True, width="stretch", height=640, key=f"pm_table_{market}",
+    # table fills the rest of the window (CSS in app.py), so headers stay visible and the page doesn't scroll
+    event = st.dataframe(sty, hide_index=True, width="stretch", height=600, key=f"pm_table_{market}",
                          column_config=cc, on_select="rerun", selection_mode="single-row")
-    st.caption(
-        "To open a player's window (projection build-up, outcome chart, season game log), tick the checkbox at the "
-        "far left of his row or pick him under the table. "
-        "**Pos** = role this week among teammates expected to play (re-ranks when you rule players out). "
-        "**Opp allows** = per game to his role this season, rank among 32 defenses (1st = allows the most); "
-        "for rushing, rank among this week's opponents. **Model / Book** = P(over) from the model and from the book "
-        "price with its margin removed. Fair line and over/under prices are in the player window. **Edge** = model minus book "
-        f"on the better side, green at ≥ {EDGE_MIN:.0%}. **EV** = expected return per $1. "
-        "Opponent-by-role numbers are context: in backtests they didn't improve projections.")
-
-    # Open the player window: (a) tick the checkbox at the left edge of a row, or
-    # (b) pick a name below. Either way it opens once per new pick.
     sel = event.selection.rows if event is not None and hasattr(event, "selection") else []
-    names = df["Player"].tolist()
-    pc1, pc2 = st.columns([3, 5])
-    picked_name = pc1.selectbox("Open player window", ["—"] + names, key=f"pm_pick_{market}",
-                                help="Or tick the checkbox at the far left of any row in the table.")
-    if pc2.button("Open", key=f"pm_open_{market}") and picked_name != "—":
-        st.session_state["pm_last_open"] = None  # force re-open of the same player
-    target = None
     if sel:
-        target = ("row", sel[0])
-    elif picked_name != "—":
-        target = ("pick", names.index(picked_name))
-    if target is not None:
-        i = target[1]
-        token = (market, target[0], df.loc[i, "player_id"])
+        token = (market, df.loc[sel[0], "player_id"])
         if st.session_state.get("pm_last_open") != token:
             st.session_state["pm_last_open"] = token
-            _player_window(R, market, df.loc[i].to_dict())
+            _player_window(R, market, df.loc[sel[0]].to_dict())
     else:
         st.session_state["pm_last_open"] = None
 
-    # ---------------- manual entry
-    with st.expander("Enter or override lines by hand (kept until you close the tab)"):
+    # ---------------- manual lines (popover in the control row)
+    with lines_box:
         base = st.session_state.get(man_key)
         if base is None:
             base = pd.DataFrame({"Player": df["Player"].sort_values().tolist(), "Line": np.nan, "Over": np.nan, "Under": np.nan})
-        ed = st.data_editor(base, hide_index=True, width="stretch", key=f"ed_{market}",
+        ed = st.data_editor(base, hide_index=True, height=420, width=460, key=f"ed_{market}",
                             column_config={"Player": st.column_config.TextColumn(disabled=True),
                                            "Line": st.column_config.NumberColumn(step=0.5),
                                            "Over": st.column_config.NumberColumn(help="American odds, e.g. -115"),
@@ -470,9 +422,7 @@ def render():
         if st.button("Apply lines", key=f"apply_{market}"):
             st.session_state[man_key] = ed
             st.rerun()
-
-    if len(wide):
-        unmatched = wide[wide["player_id"].isna()]["player_raw"].unique()
-        if len(unmatched):
-            with st.expander(f"{len(unmatched)} players in the odds feed couldn't be matched"):
-                st.write(", ".join(sorted(unmatched)))
+        if len(wide):
+            unmatched = wide[wide["player_id"].isna()]["player_raw"].unique()
+            if len(unmatched):
+                st.caption(f"Not matched from the odds feed: {', '.join(sorted(unmatched))}")

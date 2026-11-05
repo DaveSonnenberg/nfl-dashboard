@@ -18,6 +18,13 @@ import qb_tab
 
 st.set_page_config(page_title="NFL Props", page_icon="🏈", layout="wide",
                    initial_sidebar_state="collapsed")
+st.html("""<style>
+.block-container {padding-top: 3.8rem; padding-bottom: 0.5rem;}
+[data-testid="stTabs"] [data-baseweb="tab-list"] {margin-bottom: -0.6rem;}
+/* Props table: fill the window below the control row */
+div[class*="st-key-pm_table_"], div[class*="st-key-pm_table_"] [data-testid="stDataFrame"],
+div[class*="st-key-pm_table_"] [data-testid="stDataFrameResizable"] {height: calc(100vh - 258px) !important;}
+</style>""")
 
 OVERRIDES_PATH = Path(__file__).parent / "role_overrides.csv"
 STAT_LABELS = {
@@ -205,5 +212,4 @@ with tab_match:
 with tab_qb:
     render_qb()
 
-st.divider()
 st.caption("Data: nflverse (CC-BY 4.0) + FTN charting (CC-BY-SA 4.0) via nflreadpy.")
