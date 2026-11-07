@@ -35,7 +35,8 @@ REC = dict(decay=0.8, k_share=50, k_cr=80, k_ypt=120, w_prior=0.5, alpha=0.5)
 # Teammate-return adjustment: past games in which a teammate who is active NOW was absent get their
 # share deflated (beta) and down-weighted (gamma), by D = sum of the absent-now-active teammates' shares.
 TM = dict(rec_beta=0.0, rec_gamma=0.0, rush_beta=0.0, rush_gamma=0.0, same_pos=True,
-          rec_over=0.5, rush_over=0.75)  # backtest (model/teammate_return.py): rush 0.75 helps both seasons; rec no gain  # *_over: how much of an over-allocated room is scaled back
+          rec_over=0.5, rush_over=0.75,
+          snap_rec=0.0, snap_rush=0.0, snap_win=2)  # snap_*: exponent on (recent snap% / longer-run snap%)  # backtest (model/teammate_return.py): rush 0.75 helps both seasons; rec no gain  # *_over: how much of an over-allocated room is scaled back
 RUSH = dict(decay=0.7, k_share=10, k_ypc=40, w_prior=0.5, alpha=0.5)
 PASS = dict(decay_team=0.8, k_team=4, k_ypa=100, w_prior=0.5)
 QBR = dict(k_games=1, k_ypc=20)
@@ -378,10 +379,23 @@ def _player_features(u: pd.DataFrame, T: pd.DataFrame) -> pd.DataFrame:
     prior = p_share.fillna(pd.Series(fb, index=u.index))
     kp = np.where(has, REC["k_share"], 25)
     u["est_tshare"] = (u["d_tgt"] + kp * prior) / (u["d_tt"] + kp)
+    # snap-share trend: last `snap_win` games' snap% vs recency-weighted snap% (both before this game)
+    sp = u["offense_pct"].astype(float)
+    one = pd.Series(np.where(sp.notna() & ~u["upcoming"], 1.0, 0.0), index=u.index)
+    u["_sp"] = sp.fillna(0).where(~u["upcoming"], 0)
+    u["_one"] = one
+    d_sp = _decayed(u, "_sp", 0.85, ["player_id", "season"])
+    d_n = _decayed(u, "_one", 0.85, ["player_id", "season"])
+    rec_sp = g["offense_pct"].transform(lambda x: x.shift(1).rolling(TM["snap_win"], min_periods=1).mean())
+    long_sp = d_sp / np.where(d_n > 0, d_n, np.nan)
+    u["snap_trend"] = ((rec_sp + 0.05) / (long_sp + 0.05)).clip(0.4, 2.5).fillna(1.0)
+    u = u.drop(columns=["_sp", "_one"])
     if TM["rec_beta"] or TM["rec_gamma"]:
         nt, dt = _roster_adjusted(u, "targets", "team_targets", REC["decay"], "est_tshare",
                                   TM["rec_beta"], TM["rec_gamma"], TM["same_pos"])
         u["est_tshare"] = (nt + kp * prior) / (dt + kp)
+    if TM["snap_rec"]:
+        u["est_tshare"] = u["est_tshare"] * u["snap_trend"] ** TM["snap_rec"]
     u["tshare_adj"] = _redistribute(u)
     w = REC["w_prior"]
     n = u["c_targets"] + w * u["p_tgt"]
@@ -398,6 +412,8 @@ def _player_features(u: pd.DataFrame, T: pd.DataFrame) -> pd.DataFrame:
         nc, dc = _roster_adjusted(u, "carries", "team_carries", RUSH["decay"], "est_cshare",
                                   TM["rush_beta"], TM["rush_gamma"], TM["same_pos"])
         u["est_cshare"] = (nc + kr * prior_r) / (dc + kr)
+    if TM["snap_rush"]:
+        u["est_cshare"] = u["est_cshare"] * u["snap_trend"] ** TM["snap_rush"]
     totr = u.groupby(["game_id", "team"])["est_cshare"].transform("sum")
     ar = np.where(totr > 1, TM["rush_over"], RUSH["alpha"])
     u["cshare_adj"] = u["est_cshare"] * (1 + ar * (1.0 / totr - 1))

@@ -13,6 +13,7 @@ import pandas as pd
 import streamlit as st
 
 import nfl_data as d
+import defense_log
 import game_ratings
 import props_tab
 import qb_tab
@@ -136,16 +137,22 @@ def render_matchups():
         st.dataframe(lg_row, width="stretch")
 
     with tab_log:
-        dteam = st.selectbox("Defense", sorted(dvr["defteam"].unique()), key="log_team")
-        sub = dvr[dvr["defteam"] == dteam].set_index("role").reindex(d.ROLE_ORDER)
-        cols = st.columns(len(d.ROLE_ORDER))
-        for c, role in zip(cols, d.ROLE_ORDER):
-            r = sub.loc[role]
-            c.metric(role, f"{r[col]:.1f}", f"{r['diff']:+.1f} vs avg")
-        st.caption(f"{STAT_LABELS[stat]} per game allowed · {int(sub['games'].iloc[0])} games "
-                   f"(stat and weeks follow the Defense grid filters). "
-                   "Each line reads Rec/Targets, yards.")
-        st.dataframe(d.defense_game_log(pg, dteam, weeks), hide_index=True, width="stretch")
+        l1, l2 = st.columns([1, 2])
+        dteam = l1.selectbox("Defense", sorted(dvr["defteam"].unique()), key="log_team")
+        view = l2.segmented_control("View", ["Receiving", "Rushing", "Passing"], default="Receiving", key="log_view")
+        if view in ("Rushing", "Passing"):
+            st.caption(f"{season} · weeks {weeks[0]}–{weeks[1]} (weeks follow the Defense grid filter).")
+            defense_log.show(view.lower(), season, dteam, weeks, key="mx")
+        else:
+            sub = dvr[dvr["defteam"] == dteam].set_index("role").reindex(d.ROLE_ORDER)
+            cols = st.columns(len(d.ROLE_ORDER))
+            for c, role in zip(cols, d.ROLE_ORDER):
+                r = sub.loc[role]
+                c.metric(role, f"{r[col]:.1f}", f"{r['diff']:+.1f} vs avg")
+            st.caption(f"{STAT_LABELS[stat]} per game allowed · {int(sub['games'].iloc[0])} games "
+                       f"(stat and weeks follow the Defense grid filters). "
+                       "Each line reads Rec/Targets, yards.")
+            st.dataframe(d.defense_game_log(pg, dteam, weeks), hide_index=True, width="stretch")
 
     with tab_roles:
         oteam = st.selectbox("Offense", sorted(pg["team"].unique()), key="role_team")

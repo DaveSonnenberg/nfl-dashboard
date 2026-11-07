@@ -195,6 +195,16 @@ def _probabilities(df: pd.DataFrame, dist: dict) -> pd.DataFrame:
 # --------------------------------------------------------------------------
 # player window
 # --------------------------------------------------------------------------
+@st.dialog("Defense game log", width="large")
+def _defense_window(R: dict, market: str, opp: str):
+    import defense_log
+    season = int(R["history"]["season"].max())
+    kind = {"receptions": "receiving", "rec_yards": "receiving", "carries": "rushing",
+            "rush_yards": "rushing", "pass_yards": "passing"}[market]
+    st.markdown(f"### {opp} defense · {kind} allowed · {season}")
+    defense_log.show(kind, season, opp, history=R["history"], key="pm")
+
+
 @st.dialog("Player", width="large")
 def _player_window(R: dict, market: str, r: dict):
     d = r["_detail"]
@@ -414,15 +424,27 @@ def render():
           "Flags": st.column_config.TextColumn(width="small", help="Injury status, small sample, new team, teammates out")}
     # table fills the rest of the window (CSS in app.py), so headers stay visible and the page doesn't scroll
     event = st.dataframe(sty, hide_index=True, width="stretch", height=600, key=f"pm_table_{market}",
-                         column_config=cc, on_select="rerun", selection_mode="single-row")
-    sel = event.selection.rows if event is not None and hasattr(event, "selection") else []
-    if sel:
-        token = (market, df.loc[sel[0], "player_id"])
-        if st.session_state.get("pm_last_open") != token:
-            st.session_state["pm_last_open"] = token
-            _player_window(R, market, df.loc[sel[0]].to_dict())
-    else:
+                         column_config=cc, on_select="rerun", selection_mode=["single-row", "single-cell"])
+    sel = event.selection if event is not None and hasattr(event, "selection") else {}
+    rows, cells = list(sel.get("rows", [])), list(sel.get("cells", []))
+    token, action = None, None
+    if cells:  # click a Player cell -> player window; an Opp allows cell -> that defense's game log
+        i, col = cells[0]
+        if col == "Opp allows":
+            token, action = ("def", market, df.iloc[i]["opp"]), "def"
+        elif col == "Player":
+            token, action = ("player", market, df.iloc[i]["player_id"]), "player"
+            rows = [i]
+    elif rows:
+        token, action = ("player", market, df.iloc[rows[0]]["player_id"]), "player"
+    if token is None:
         st.session_state["pm_last_open"] = None
+    elif st.session_state.get("pm_last_open") != token:
+        st.session_state["pm_last_open"] = token
+        if action == "player":
+            _player_window(R, market, df.iloc[rows[0]].to_dict())
+        else:
+            _defense_window(R, market, df.iloc[cells[0][0]]["opp"])
 
     # ---------------- manual lines (popover in the control row)
     with lines_box:

@@ -101,9 +101,7 @@ if __name__ == "__main__":
     print(f"base built {time.time() - t0:.0f}s")
     R0 = evaluate(P0, expo).assign(variant="baseline")
     out = [R0]
-    grid = [dict(rush_over=o, rec_over=o) for o in [0.75, 1.0]]
-    grid += [dict(rush_beta=b, rec_beta=b) for b in [0.25]]
-    grid += [dict(rush_beta=0.25, rec_beta=0.25, rush_over=1.0, rec_over=1.0)]
+    grid = [dict(snap_rec=x, snap_rush=x, snap_win=w) for w in [1, 2] for x in [0.25, 0.5, 1.0]]
     for tm in grid:
         P = features(u, T, **tm)
         out.append(evaluate(P, expo).assign(variant=str(tm)))
