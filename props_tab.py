@@ -103,6 +103,7 @@ def _market_frame(R: dict, market: str, force_ids: set | None = None) -> pd.Data
                      + up["E_tgt"].map(lambda x: f"{x:.1f} tgt"),
             "opp_text": opp_text, "opp_val": vals, "opp_rank": rnks,
             "mu": up["mu_" + market], "games": up["c_g"], "inj": up["inj_status"], "new_team": up["new_team"],
+            "ret": up["returning"].fillna(False),
             "team_spread": up["team_spread"], "total_line": up["total_line"], "dist_key": market, "kind": "skill",
         })
         df["_detail"] = up.to_dict("records")
@@ -118,6 +119,7 @@ def _market_frame(R: dict, market: str, force_ids: set | None = None) -> pd.Data
         "opp_val": rb["opp_carries_pg" if stat == "carries" else "opp_rush_yds_pg"],
         "opp_label": "to RBs", "opp_group": "rb",
         "mu": rb["mu_" + market], "games": rb["c_g"], "inj": rb["inj_status"], "new_team": rb["new_team"],
+        "ret": rb["returning"].fillna(False),
         "team_spread": rb["team_spread"], "total_line": rb["total_line"], "dist_key": market, "kind": "skill",
     })
     rb_df["_detail"] = rb.to_dict("records")
@@ -155,6 +157,8 @@ def _flags(r, out_by_team: dict) -> str:
         f.append(f"{int(r['games'])} g")
     if r.get("new_team"):
         f.append("new team")
+    if r.get("ret") == True:  # noqa: E712 (numpy bool)
+        f.append("returning")
     outs = out_by_team.get(r["team"], [])
     if outs:
         f.append("out: " + ", ".join(outs))

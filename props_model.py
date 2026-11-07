@@ -32,6 +32,10 @@ DIST = HERE / "model" / "dist_specs.json"
 
 # tuned constants (see model/*.py)
 REC = dict(decay=0.8, k_share=50, k_cr=80, k_ypt=120, w_prior=0.5, alpha=0.5)
+# Teammate-return adjustment: past games in which a teammate who is active NOW was absent get their
+# share deflated (beta) and down-weighted (gamma), by D = sum of the absent-now-active teammates' shares.
+TM = dict(rec_beta=0.0, rec_gamma=0.0, rush_beta=0.0, rush_gamma=0.0, same_pos=True,
+          rec_over=0.5, rush_over=0.75)  # backtest (model/teammate_return.py): rush 0.75 helps both seasons; rec no gain  # *_over: how much of an over-allocated room is scaled back
 RUSH = dict(decay=0.7, k_share=10, k_ypc=40, w_prior=0.5, alpha=0.5)
 PASS = dict(decay_team=0.8, k_team=4, k_ypa=100, w_prior=0.5)
 QBR = dict(k_games=1, k_ypc=20)
@@ -65,6 +69,43 @@ def _decayed(df: pd.DataFrame, col: str, lam: float, keys: list[str]) -> np.ndar
         for i in idx:
             out[i] = a; a = a * lam + v[i]
     return out
+
+
+def _roster_adjusted(u: pd.DataFrame, stat: str, team_stat: str, lam: float, share: str,
+                     beta: float, gamma: float, same_pos: bool) -> tuple[np.ndarray, np.ndarray]:
+    """Decayed sums of `stat` and `team_stat` over each player's earlier games this season (like
+    _decayed), where an earlier game h is adjusted for teammates who are active in the current game
+    but were absent in h: D_h = sum of those teammates' current `share`; numerator * (1 - beta*D_h),
+    weight * exp(-gamma*D_h). beta = gamma = 0 reproduces _decayed exactly."""
+    n = len(u)
+    num, den = np.zeros(n), np.zeros(n)
+    pid = u["player_id"].to_numpy(); gid = u["game_id"].to_numpy(); team = u["team"].to_numpy()
+    pos = u["pos"].fillna("RB").to_numpy(); sh = u[share].to_numpy(float)
+    v = u[stat].to_numpy(float); tv = u[team_stat].to_numpy(float)
+    # active set per (game, team): player -> (pos, current share)
+    act = {}
+    for i in range(n):
+        act.setdefault((gid[i], team[i]), {})[pid[i]] = (pos[i], sh[i])
+    for idx in u.groupby(["player_id", "season"], sort=False).indices.values():
+        idx = sorted(idx, key=lambda i: (u.at[i, "week"]))
+        for a, i in enumerate(idx):
+            cur = act[(gid[i], team[i])]
+            nn = dd = 0.0
+            for b in range(a):
+                h = idx[b]
+                w = lam ** (a - 1 - b)
+                D = 0.0
+                if team[h] == team[i] and (beta or gamma):
+                    prev = act.get((gid[h], team[h]), {})
+                    for j, (pj, sj) in cur.items():
+                        if j != pid[i] and j not in prev and (not same_pos or pj == pos[i]) and sj == sj:
+                            D += sj
+                    D = min(D, 0.9)
+                w *= np.exp(-gamma * D)
+                nn += w * v[h] * max(1 - beta * D, 0.0)
+                dd += w * tv[h]
+            num[i], den[i] = nn, dd
+    return num, den
 
 
 def norm_name(s: str) -> str:
@@ -116,7 +157,7 @@ def next_games(sch: pd.DataFrame) -> pd.DataFrame:
 # ==========================================================================
 def candidates(raw: dict) -> pd.DataFrame:
     """Players the upcoming projections would include (before any Out removals)."""
-    raw2 = {**raw, "manual_out": (), "inj": None}
+    raw2 = {**raw, "manual_out": (), "inj": None, "inj_ret": raw.get("inj")}
     u, _ = _universe(raw2, True)
     return u[u["upcoming"]][["player_id", "name", "position", "team"]]
 
@@ -134,6 +175,7 @@ def _universe(raw: dict, include_upcoming: bool) -> tuple[pd.DataFrame, pd.DataF
     u["name"] = u["player_display_name"].fillna(u["player"])
     u = u.drop(columns=["player_display_name", "player"])
     u["upcoming"] = False
+    u["returning"] = False
     u["inj_status"] = None
 
     # team-game totals (all positions; non-QB carries)
@@ -148,7 +190,7 @@ def _universe(raw: dict, include_upcoming: bool) -> tuple[pd.DataFrame, pd.DataF
     if include_upcoming:
         cur = raw["sch"]["season"].max()
         up = next_games(raw["sch"][raw["sch"]["season"] == cur])
-        rows, excluded = [], []
+        rows, excluded, returning = [], [], set()
         inj = raw.get("inj")
         for r in up.itertuples(index=False):
             hist = u[(u["team"] == r.team) & (u["season"] == cur)]
@@ -159,8 +201,18 @@ def _universe(raw: dict, include_upcoming: bool) -> tuple[pd.DataFrame, pd.DataF
                 base = hist.drop_duplicates("player_id", keep="last")
             else:
                 last_weeks = sorted(hist["week"].unique())[-3:]
-                cand = hist[hist["week"].isin(last_weeks)]["player_id"].unique()
+                cand = set(hist[hist["week"].isin(last_weeks)]["player_id"].unique())
                 base = hist.drop_duplicates("player_id", keep="last")
+                # returning from injury: played earlier this season, missed the last 3 games, and is on this
+                # week's injury report as anything but Out/Doubtful (returners show up there; backtest:
+                # model/returners.py cut teammates' carry error ~27% in those games)
+                ir = raw.get("inj_ret", raw.get("inj"))
+                if ir is not None and len(ir):
+                    rep = ir[(ir["season"] == cur) & (ir["week"] == r.week) & (ir["team"] == r.team)
+                             & ~ir["report_status"].isin(["Out", "Doubtful"])]
+                    back = set(rep["gsis_id"]) & set(hist["player_id"]) - cand
+                    cand |= back
+                    returning |= back
             b = base[base["player_id"].isin(cand)][["player_id", "name", "position"]].copy()
             status = {}
             if inj is not None and len(inj):
@@ -173,7 +225,7 @@ def _universe(raw: dict, include_upcoming: bool) -> tuple[pd.DataFrame, pd.DataF
             excluded.append(b[is_out].assign(team=r.team))
             b = b[~is_out]
             b = b.assign(game_id=r.game_id, season=cur, week=r.week, team=r.team, offense_pct=np.nan,
-                         upcoming=True, **{c: 0.0 for c in stats_cols})
+                         upcoming=True, returning=b["player_id"].isin(returning), **{c: 0.0 for c in stats_cols})
             rows.append(b)
         if rows:
             u = pd.concat([u, pd.concat(rows, ignore_index=True)], ignore_index=True)
@@ -289,7 +341,7 @@ def _redistribute(u: pd.DataFrame, k: float = 60) -> np.ndarray:
     over = (x["act_tot"] - 0.995).clip(lower=0)
     sh = x["est_tshare"]
     out = (sh + a * (x["miss_pos"] * sh / x["act_pos"].replace(0, np.nan)).fillna(0)
-           + a * rest * sh / x["act_tot"] - a * sh * over / x["act_tot"])
+           + a * rest * sh / x["act_tot"] - TM["rec_over"] * sh * over / x["act_tot"])
     return out.to_numpy()
 
 
@@ -326,6 +378,10 @@ def _player_features(u: pd.DataFrame, T: pd.DataFrame) -> pd.DataFrame:
     prior = p_share.fillna(pd.Series(fb, index=u.index))
     kp = np.where(has, REC["k_share"], 25)
     u["est_tshare"] = (u["d_tgt"] + kp * prior) / (u["d_tt"] + kp)
+    if TM["rec_beta"] or TM["rec_gamma"]:
+        nt, dt = _roster_adjusted(u, "targets", "team_targets", REC["decay"], "est_tshare",
+                                  TM["rec_beta"], TM["rec_gamma"], TM["same_pos"])
+        u["est_tshare"] = (nt + kp * prior) / (dt + kp)
     u["tshare_adj"] = _redistribute(u)
     w = REC["w_prior"]
     n = u["c_targets"] + w * u["p_tgt"]
@@ -338,8 +394,13 @@ def _player_features(u: pd.DataFrame, T: pd.DataFrame) -> pd.DataFrame:
     prior_r = c_share.fillna(pd.Series(fbr, index=u.index))
     kr = np.where(has, RUSH["k_share"], 20)
     u["est_cshare"] = (u["d_car"] + kr * prior_r) / (u["d_tc"] + kr)
+    if TM["rush_beta"] or TM["rush_gamma"]:
+        nc, dc = _roster_adjusted(u, "carries", "team_carries", RUSH["decay"], "est_cshare",
+                                  TM["rush_beta"], TM["rush_gamma"], TM["same_pos"])
+        u["est_cshare"] = (nc + kr * prior_r) / (dc + kr)
     totr = u.groupby(["game_id", "team"])["est_cshare"].transform("sum")
-    u["cshare_adj"] = u["est_cshare"] * (1 + RUSH["alpha"] * (1.0 / totr - 1))
+    ar = np.where(totr > 1, TM["rush_over"], RUSH["alpha"])
+    u["cshare_adj"] = u["est_cshare"] * (1 + ar * (1.0 / totr - 1))
     nr = u["c_carries"] + RUSH["w_prior"] * u["p_car"]
     u["est_ypc"] = (u["c_rushing_yards"] + RUSH["w_prior"] * u["p_ryds"] + RUSH["k_ypc"] * RB_YPC) / (nr + RUSH["k_ypc"])
 
