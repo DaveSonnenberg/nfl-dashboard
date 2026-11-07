@@ -27,6 +27,11 @@ div[class*="st-key-pm_table_"], div[class*="st-key-pm_table_"] [data-testid="stD
 div[class*="st-key-pm_table_"] [data-testid="stDataFrameResizable"] {height: calc(100vh - 258px) !important;}
 </style>""")
 
+if st.query_params.get("admin") == "pull":   # hidden one-time historical odds pull
+    import admin_pull
+    admin_pull.render()
+    st.stop()
+
 OVERRIDES_PATH = Path(__file__).parent / "role_overrides.csv"
 STAT_LABELS = {
     "ppr": "PPR pts (receiving)",
