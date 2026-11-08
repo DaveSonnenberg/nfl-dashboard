@@ -1,11 +1,15 @@
-"""Game wind for the projection model.
+"""Game weather for the projection model: wind and rain, outdoor games only.
 
-Played games: nflverse schedule wind (mph at kickoff) when the roof was outdoors/open.
-Upcoming games: Open-Meteo hourly forecast (free, no key) at the stadium for the kickoff hour.
-Domes, closed roofs and retractable roofs (status unknown before the game) count as no wind.
-Model input: wind_x = max(wind - 10 mph, 0); unknown -> 0 (neutral).
+Played games: nflverse schedule wind (mph at kickoff) when the roof was outdoors/open; rain from the
+play-by-play weather text (used for fitting only).
+Upcoming games: Open-Meteo hourly forecast (free, no key) at the stadium over the game window.
+Domes, closed roofs and retractable roofs (status unknown before the game) count as no wind and no rain.
+Model inputs: wind_x = clip(wind - 10 mph, 0, 8); rain_x = chance of rain during the game (0-1;
+1 = it rained, for played games). Unknown -> 0 (neutral).
 """
 from __future__ import annotations
+
+import re
 
 import numpy as np
 import pandas as pd
@@ -42,9 +46,20 @@ def played_wind(sch: pd.DataFrame) -> pd.Series:
     return pd.Series(w, index=sch["game_id"].to_numpy())
 
 
-def forecast_wind(sch: pd.DataFrame, timeout=10) -> dict:
-    """Forecast wind (mph) at kickoff for upcoming games at outdoor stadiums. {game_id: mph}.
-    One Open-Meteo call per stadium; failures are skipped (that game stays neutral)."""
+PRECIP = re.compile(r"rain|shower|drizzle|snow|sleet|flurr|storm", re.I)
+
+
+def played_rain(pbp_weather: pd.DataFrame) -> pd.Series:
+    """1/0 per game_id from the play-by-play weather text; 0 under a roof. Columns: game_id, weather, roof."""
+    w = pbp_weather.drop_duplicates("game_id")
+    out = w["roof"].isin(["outdoors", "open"])
+    return pd.Series(np.where(out & w["weather"].fillna("").str.contains(PRECIP), 1.0, 0.0), index=w["game_id"].to_numpy())
+
+
+def forecast(sch: pd.DataFrame, timeout=10) -> dict:
+    """{game_id: {"wind": mph, "rain": chance 0-1}} for upcoming games within 15 days.
+    Non-outdoor stadiums get 0/0 without a call. One Open-Meteo call per outdoor stadium; failures are
+    skipped (that game stays neutral)."""
     up = sch[sch["result"].isna()].copy()
     if up.empty:
         return {}
@@ -55,22 +70,24 @@ def forecast_wind(sch: pd.DataFrame, timeout=10) -> dict:
     for sid, g in up.groupby("stadium_id"):
         lat, lon, kind = STADIUMS.get(sid, (None, None, "retract"))
         if kind != "outdoor":
-            out.update({gid: 0.0 for gid in g["game_id"]})
+            out.update({gid: {"wind": 0.0, "rain": 0.0} for gid in g["game_id"]})
             continue
         try:
             r = requests.get("https://api.open-meteo.com/v1/forecast", timeout=timeout, params={
-                "latitude": lat, "longitude": lon, "hourly": "wind_speed_10m", "wind_speed_unit": "mph",
-                "timezone": "UTC", "forecast_days": 16})
+                "latitude": lat, "longitude": lon, "hourly": "wind_speed_10m,precipitation_probability",
+                "wind_speed_unit": "mph", "timezone": "UTC", "forecast_days": 16})
             r.raise_for_status()
             h = r.json()["hourly"]
-            ws = pd.Series(h["wind_speed_10m"], index=pd.to_datetime(h["time"]).tz_localize("UTC"))
+            idx = pd.to_datetime(h["time"]).tz_localize("UTC")
+            ws = pd.Series(h["wind_speed_10m"], index=idx, dtype=float)
+            pp = pd.Series(h.get("precipitation_probability") or [np.nan] * len(idx), index=idx, dtype=float)
         except Exception:
             continue
         for gid, t in zip(g["game_id"], g["kick_utc"]):
-            # average over the game window (kickoff to +3h)
-            win = ws[(ws.index >= t.floor("h")) & (ws.index <= t + pd.Timedelta(hours=3))]
-            if len(win):
-                out[gid] = float(win.mean())
+            m = (idx >= t.floor("h")) & (idx <= t + pd.Timedelta(hours=3))  # game window
+            if m.any():
+                rain = pp[m].max()
+                out[gid] = {"wind": float(ws[m].mean()), "rain": float(rain) / 100 if rain == rain else 0.0}
     return out
 
 

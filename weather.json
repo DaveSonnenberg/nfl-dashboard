@@ -1,9 +1,12 @@
 {
- "receptions": -0.00704,
- "rec_yards": -0.01239,
- "carries": 0.01414,
- "rush_yards": 0.01368,
- "pass_yards": -0.01374,
- "qb_carries": 0.0,
- "qb_rush_yards": 0.0
+ "wind": {
+  "receptions": -0.00704,
+  "rec_yards": -0.01239,
+  "carries": 0.01414,
+  "rush_yards": 0.01368,
+  "pass_yards": -0.01374,
+  "qb_carries": 0.0,
+  "qb_rush_yards": 0.0
+ },
+ "rain": {}
 }
