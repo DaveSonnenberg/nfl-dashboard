@@ -26,6 +26,8 @@ import pandas as pd
 import polars as pl
 from scipy import stats
 
+import weather
+
 HERE = Path(__file__).parent
 COEFS = HERE / "model" / "coefs.json"
 DIST = HERE / "model" / "dist_specs.json"
@@ -125,6 +127,13 @@ def load_raw(seasons: list[int], current: int | None = None) -> dict:
                    "attempts", "passing_yards"]).to_pandas())
     sn = nfl.load_snap_counts([s for s in seasons if s >= min(seasons)]).filter(pl.col("game_type") == "REG").to_pandas()
     sch = nfl.load_schedules(seasons).filter(pl.col("game_type") == "REG").to_pandas()
+    sch["fc_wind"] = np.nan
+    if current is not None:  # forecast wind for upcoming games (Open-Meteo; neutral if unreachable)
+        try:
+            fc = weather.forecast_wind(sch[sch["season"] == current])
+            sch["fc_wind"] = sch["game_id"].map(fc)
+        except Exception:
+            pass
     players = nfl.load_players().select(["gsis_id", "pfr_id", "display_name", "position"]).to_pandas()
     inj = None
     if current is not None:
@@ -138,7 +147,11 @@ def load_raw(seasons: list[int], current: int | None = None) -> dict:
 def _games(sch: pd.DataFrame) -> pd.DataFrame:
     """One row per team per game with lines from the team's view."""
     a = sch[["game_id", "season", "week", "gameday", "home_team", "away_team", "spread_line", "total_line",
-             "result", "home_qb_id", "away_qb_id"]]
+             "result", "home_qb_id", "away_qb_id"]].copy()
+    pw = weather.played_wind(sch).to_numpy()
+    fw = sch["fc_wind"].to_numpy(float) if "fc_wind" in sch else np.full(len(sch), np.nan)
+    a["wind"] = np.where(sch["result"].notna().to_numpy(), pw, fw)
+    a["wind_x"] = weather.wind_x(a["wind"])
     h = a.rename(columns={"home_team": "team", "away_team": "opp", "home_qb_id": "qb_id"}).assign(home=True)
     w = a.rename(columns={"away_team": "team", "home_team": "opp", "away_qb_id": "qb_id"}).assign(home=False)
     g = pd.concat([h, w], ignore_index=True).drop(columns=["away_qb_id", "home_qb_id"], errors="ignore")
@@ -232,7 +245,8 @@ def _universe(raw: dict, include_upcoming: bool) -> tuple[pd.DataFrame, pd.DataF
             u = pd.concat([u, pd.concat(rows, ignore_index=True)], ignore_index=True)
         raw["excluded"] = pd.concat(excluded, ignore_index=True) if excluded else pd.DataFrame()
     G = G[G["played"] | G["game_id"].isin(u.loc[u["upcoming"], "game_id"])]
-    u = u.merge(G[["game_id", "team", "opp", "home", "team_spread", "total_line", "team_targets", "team_carries"]],
+    u = u.merge(G[["game_id", "team", "opp", "home", "team_spread", "total_line", "team_targets", "team_carries",
+                   "wind", "wind_x"]],
                 on=["game_id", "team"], how="left")
     u["pos"] = u["position"].map(_pos)
     return u, G
@@ -471,7 +485,8 @@ def _qb_features(raw: dict, G: pd.DataFrame, T: pd.DataFrame) -> pd.DataFrame:
     ps = raw["ps"]
     qb_all = ps[ps["attempts"] > 0][["player_id", "player_display_name", "game_id", "season", "week", "team",
                                      "attempts", "passing_yards"]]
-    Q = G[["game_id", "season", "week", "team", "opp", "qb_id", "played", "team_spread", "total_line", "team_att"]].copy()
+    Q = G[["game_id", "season", "week", "team", "opp", "qb_id", "played", "team_spread", "total_line", "team_att",
+           "wind", "wind_x"]].copy()
     nxt = next_games(raw["sch"][raw["sch"]["season"] == raw["sch"]["season"].max()])
     keep_next = set(zip(nxt["team"], nxt["game_id"]))
     Q = Q[Q["played"].to_numpy() | np.array([(t, g) in keep_next for t, g in zip(Q["team"], Q["game_id"])], dtype=bool)]
@@ -585,10 +600,37 @@ SPEC = {  # market: (base column(s), multiplier columns)
 }
 
 
+_WIND_PATH = Path(__file__).parent / "model" / "weather.json"
+WIND = json.loads(_WIND_PATH.read_text()) if _WIND_PATH.exists() else {}  # market -> b per mph over 10
+
+
+def wind_mult(df: pd.DataFrame, market: str) -> np.ndarray:
+    b = WIND.get(market, 0.0)
+    if not b or "wind_x" not in df:
+        return np.ones(len(df))
+    return np.exp(b * df["wind_x"].fillna(0).to_numpy(float))
+
+
 def apply(df: pd.DataFrame, market: str, coefs: list[float]) -> np.ndarray:
     base_cols, mcols = SPEC[market]
     base = np.prod([df[c].to_numpy(float) for c in base_cols], axis=0)
-    return base * _mult(df, coefs, mcols)
+    return base * _mult(df, coefs, mcols) * wind_mult(df, market)
+
+
+def fit_wind(df: pd.DataFrame, market: str, y: str, coefs: list[float]) -> float:
+    """Wind coefficient by Poisson loss, holding the market's other coefficients fixed."""
+    from scipy.optimize import minimize_scalar
+    base_cols, mcols = SPEC[market]
+    d = df.dropna(subset=base_cols + [y])
+    old = WIND.pop(market, None)
+    try:
+        m0 = np.maximum(apply(d, market, coefs), 1e-6)
+    finally:
+        if old is not None:
+            WIND[market] = old
+    x = d["wind_x"].fillna(0).to_numpy(float); Y = d[y].to_numpy(float)
+    return float(minimize_scalar(lambda b: np.mean(m0 * np.exp(b * x) - Y * (np.log(m0) + b * x)),
+                                 bounds=(-0.2, 0.2), method="bounded").x)
 
 
 def fit_coefs(df: pd.DataFrame, market: str, y: str) -> list[float]:
