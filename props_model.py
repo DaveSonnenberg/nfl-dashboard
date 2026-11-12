@@ -137,13 +137,18 @@ def load_raw(seasons: list[int], current: int | None = None) -> dict:
         except Exception:
             pass
     players = nfl.load_players().select(["gsis_id", "pfr_id", "display_name", "position"]).to_pandas()
-    inj = None
+    inj = rost = None
     if current is not None:
         try:
             inj = nfl.load_injuries([current]).to_pandas()
         except Exception:
             inj = None
-    return {"ps": ps, "sn": sn, "sch": sch, "players": players, "inj": inj}
+        try:  # weekly rosters: reserve lists (IR, PUP, NFI, suspended), cut, retired
+            rost = nfl.load_rosters_weekly([current]).select(
+                ["season", "week", "team", "gsis_id", "status", "status_description_abbr"]).to_pandas()
+        except Exception:
+            rost = None
+    return {"ps": ps, "sn": sn, "sch": sch, "players": players, "inj": inj, "rost": rost}
 
 
 def _games(sch: pd.DataFrame) -> pd.DataFrame:
@@ -245,9 +250,15 @@ def _universe(raw: dict, include_upcoming: bool) -> tuple[pd.DataFrame, pd.DataF
                 ii = inj[(inj["season"] == cur) & (inj["week"] == r.week) & (inj["team"] == r.team)]
                 status = dict(zip(ii["gsis_id"], ii["report_status"]))
             b["inj_status"] = b["player_id"].map(status).astype(object)
+            rost = raw.get("rost")
+            if rost is not None and len(rost):  # latest roster status this season up to this week
+                rr = rost[(rost["season"] == cur) & (rost["week"] <= r.week)].sort_values("week")
+                last = rr.drop_duplicates("gsis_id", keep="last").set_index("gsis_id")["status"]
+                off = b["player_id"].map(last).isin(["RES", "CUT", "RET", "EXE"]).to_numpy()
+                b.loc[off & ~b["inj_status"].isin(["Out"]).to_numpy(), "inj_status"] = "IR/reserve"
             manual = b["player_id"].isin(raw.get("manual_out", ()))
             b.loc[manual, "inj_status"] = "Out (you)"
-            is_out = b["inj_status"].isin(["Out", "Out (you)"])
+            is_out = b["inj_status"].isin(["Out", "Out (you)", "IR/reserve"])
             excluded.append(b[is_out].assign(team=r.team))
             b = b[~is_out]
             b = b.assign(game_id=r.game_id, season=cur, week=r.week, team=r.team, offense_pct=np.nan,

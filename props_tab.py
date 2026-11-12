@@ -315,16 +315,18 @@ def render():
     opts = _out_options(season)
     label = {r.player_id: f"{r.name} · {r.team} {r.pos}" for r in opts.itertuples(index=False)}
     auto = _projections(season, ())["out"]
-    auto = auto[auto["inj_status"] == "Out"]
+    auto = auto[auto["inj_status"].isin(["Out", "IR/reserve"])]
     # ---------------- one compact control row
     c_mk, c_bk, c_tm, c_out, c_only, c_odds, c_ln = st.columns([2.2, 1.6, 1.8, 3.2, 1.3, 1.1, 0.9],
                                                                vertical_alignment="bottom")
     market = c_mk.selectbox("Market", list(pm.MARKETS), format_func=pm.MARKETS.get, key="pm_market")
-    official = ", ".join(f"{n} ({t})" for n, t in zip(auto["name"], auto["team"])) or "none posted yet"
+    official = ", ".join(f"{n} ({t}{', IR' if s_ == 'IR/reserve' else ''})"
+                         for n, t, s_ in zip(auto["name"], auto["team"], auto["inj_status"])) or "none posted yet"
     picked = c_out.multiselect(
         "Ruled out", options=list(label), format_func=label.get, key="pm_out", placeholder="Add players…",
         help="Removes the player and shifts his usage to teammates; roles re-rank. Only mark players who are "
-             f"ruled out — questionable players stay in. Official Out (applied automatically): {official}.")
+             f"ruled out — questionable players stay in. Applied automatically (official Out, and IR/reserve from "
+             f"NFL rosters, which can lag a day or two): {official}.")
     R = _projections(season, tuple(sorted(picked)))
     out_by_team = R["out"].groupby("team")["name"].apply(list).to_dict() if len(R["out"]) else {}
 
