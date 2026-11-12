@@ -38,7 +38,12 @@ REC = dict(decay=0.8, k_share=50, k_cr=80, k_ypt=120, w_prior=0.5, alpha=0.5)
 # share deflated (beta) and down-weighted (gamma), by D = sum of the absent-now-active teammates' shares.
 TM = dict(rec_beta=0.0, rec_gamma=0.0, rush_beta=0.0, rush_gamma=0.0, same_pos=True,
           rec_over=0.5, rush_over=0.75,
-          snap_rec=0.0, snap_rush=0.0, snap_win=2)  # snap_*: exponent on (recent snap% / longer-run snap%)  # backtest (model/teammate_return.py): rush 0.75 helps both seasons; rec no gain  # *_over: how much of an over-allocated room is scaled back
+          snap_rec=0.0, snap_rush=0.0, snap_win=2,
+          # v2 receiver redistribution (model/wr_out_backtest.py): missing WR targets split by position
+          # (WR/TE/RB), WR part weighted by recent snaps; snap floor; efficiency cut with WRs out
+          # backtest picked: snap weight 0.4, split 82/15/3, NO snap floor and NO efficiency cut (both hurt)
+          rec_v2=True, wr_split=(0.82, 0.15, 0.03), snap_beta=0.4, snap_floor=0.0, floor_min_snap=0.40,
+          eff_cut=(0.0, 0.0), cr_cut=(0.0, 0.0), eff_thr=(0.12, 0.30))  # snap_*: exponent on (recent snap% / longer-run snap%)  # backtest (model/teammate_return.py): rush 0.75 helps both seasons; rec no gain  # *_over: how much of an over-allocated room is scaled back
 RUSH = dict(decay=0.7, k_share=10, k_ypc=40, w_prior=0.5, alpha=0.5)
 PASS = dict(decay_team=0.8, k_team=4, k_ypa=100, w_prior=0.5)
 QBR = dict(k_games=1, k_ypc=20)
@@ -383,6 +388,77 @@ def _redistribute(u: pd.DataFrame, k: float = 60) -> np.ndarray:
     return out.to_numpy()
 
 
+def _redistribute_v2(u: pd.DataFrame, k: float = 60) -> tuple[np.ndarray, np.ndarray]:
+    """Target share v2. Missing share by position (team's usual position share minus actives'):
+    missing WR share goes WR/TE/RB per TM['wr_split'] (league pattern when a key WR is out); the WR part
+    is split by est_tshare + snap_beta * recent snap share (backups who take the snaps get the targets);
+    missing TE/RB share as in v1. WRs at 40%+ recent snaps get at least snap_floor * snap share. Returns
+    (share, missing WR share) - the second drives the efficiency cut."""
+    a = REC["alpha"]
+    tg = (u.assign(pos=u["pos"].fillna("RB"))
+          .groupby(["season", "week", "game_id", "team", "pos"])["targets"].sum().unstack("pos").fillna(0))
+    tg = tg.join(u.groupby(["season", "week", "game_id", "team"])["team_targets"].first()).reset_index()
+    tg = tg.sort_values(["team", "season", "week"])
+    for p in ["WR", "TE", "RB"]:
+        if p not in tg:
+            tg[p] = 0.0
+    lg = {p: tg[p].sum() / max(tg["team_targets"].sum(), 1) for p in ["WR", "TE", "RB"]}
+    gg = tg.groupby(["team", "season"])
+    ctt = gg["team_targets"].cumsum() - tg["team_targets"]
+    S = []
+    for p in ["WR", "TE", "RB"]:
+        cum = gg[p].cumsum() - tg[p]
+        S.append(tg[["game_id", "team"]].assign(pos=p, S_pos=((cum + k * lg[p]) / (ctt + k)).to_numpy()))
+    S = pd.concat(S)
+    x = u[["game_id", "team", "pos", "est_tshare", "snap_l2"]].merge(S, on=["game_id", "team", "pos"], how="left")
+    x["pos"] = x["pos"].fillna("RB")
+    x["S_pos"] = x["S_pos"].fillna(0)
+    x["snap_l2"] = x["snap_l2"].fillna(0)
+    key = ["game_id", "team"]
+    x["act_pos"] = x.groupby(key + ["pos"])["est_tshare"].transform("sum")
+    x["miss_pos"] = (x["S_pos"] - x["act_pos"]).clip(lower=0)
+    mp = x.drop_duplicates(key + ["pos"]).pivot_table(index=key, columns="pos", values="miss_pos", aggfunc="first").fillna(0)
+    for p in ["WR", "TE", "RB"]:
+        if p not in mp:
+            mp[p] = 0.0
+    x = x.join(mp[["WR", "TE", "RB"]].add_prefix("m_"), on=key)
+    sh = x["est_tshare"].to_numpy(float)
+    pos = x["pos"].to_numpy()
+    add = np.zeros(len(x))
+    fw, ft, fr = TM["wr_split"]
+    # missing WR share -> WRs (snap-weighted), TEs and RBs (share-proportional)
+    wgt = np.where(pos == "WR", sh + TM["snap_beta"] * x["snap_l2"].to_numpy(float), 0.0)
+    x["_w"] = wgt
+    wsum = x.groupby(key)["_w"].transform("sum").to_numpy(float)
+    add += np.where(pos == "WR", fw * x["m_WR"] * np.divide(wgt, wsum, out=np.zeros_like(wgt), where=wsum > 0), 0)
+    for p, f in [("TE", ft), ("RB", fr)]:
+        # TEs: split evenly among TEs who play (20%+ snaps) - star TEs gain little when a WR is out;
+        # RBs: in proportion to share
+        if p == "TE":
+            ps = np.where((pos == "TE") & (x["snap_l2"].to_numpy(float) >= 0.2), 1.0, 0.0)
+        else:
+            ps = np.where(pos == p, sh, 0.0)
+        x["_p"] = ps
+        psum = x.groupby(key)["_p"].transform("sum").to_numpy(float)
+        add += f * x["m_WR"].to_numpy(float) * np.divide(ps, psum, out=np.zeros_like(ps), where=psum > 0)
+    # missing TE / RB share: v1 rule (alpha to same position, proportional)
+    for p in ["TE", "RB"]:
+        same = pos == p
+        ap = x["act_pos"].to_numpy(float)
+        add += np.where(same, a * x[f"m_{p}"].to_numpy(float) * np.divide(sh, ap, out=np.zeros_like(sh), where=ap > 0), 0)
+    out = sh + add
+    # snap floor for WRs
+    sl2 = x["snap_l2"].to_numpy(float)
+    flo = np.where((pos == "WR") & (sl2 >= TM["floor_min_snap"]), TM["snap_floor"] * sl2, 0.0)
+    out = np.maximum(out, flo)
+    # keep the team total at or under ~1
+    x["_o"] = out
+    tot = x.groupby(key)["_o"].transform("sum").to_numpy(float)
+    over = np.clip(tot - 0.995, 0, None)
+    out = out - TM["rec_over"] * out * over / np.where(tot > 0, tot, 1)
+    return out, x["m_WR"].to_numpy(float)
+
+
 def _player_features(u: pd.DataFrame, T: pd.DataFrame) -> pd.DataFrame:
     u = u.sort_values(["player_id", "season", "week"]).reset_index(drop=True)
     g = u.groupby(["player_id", "season"])
@@ -433,11 +509,23 @@ def _player_features(u: pd.DataFrame, T: pd.DataFrame) -> pd.DataFrame:
         u["est_tshare"] = (nt + kp * prior) / (dt + kp)
     if TM["snap_rec"]:
         u["est_tshare"] = u["est_tshare"] * u["snap_trend"] ** TM["snap_rec"]
-    u["tshare_adj"] = _redistribute(u)
+    u["snap_l2"] = g["offense_pct"].transform(lambda x: x.shift(1).rolling(2, min_periods=1).mean())
+    if TM["rec_v2"]:
+        u["tshare_adj"], u["wr_missing"] = _redistribute_v2(u)
+    else:
+        u["tshare_adj"] = _redistribute(u)
+        u["wr_missing"] = 0.0
     w = REC["w_prior"]
     n = u["c_targets"] + w * u["p_tgt"]
     u["est_cr"] = (u["c_receptions"] + w * u["p_rec"] + REC["k_cr"] * u["pos"].map(POS_CR)) / (n + REC["k_cr"])
     u["est_ypt"] = (u["c_receiving_yards"] + w * u["p_yds"] + REC["k_ypt"] * u["pos"].map(POS_YPT)) / (n + REC["k_ypt"])
+    if TM["rec_v2"]:  # receiving efficiency falls with key WRs out (whole team)
+        wm = u.groupby(["game_id", "team"])["wr_missing"].transform("max").fillna(0)
+        lvl = np.where(wm >= TM["eff_thr"][1], 1, np.where(wm >= TM["eff_thr"][0], 0, -1))
+        cut = np.select([lvl == 1, lvl == 0], [TM["eff_cut"][1], TM["eff_cut"][0]], 0.0)
+        crc = np.select([lvl == 1, lvl == 0], [TM["cr_cut"][1], TM["cr_cut"][0]], 0.0)
+        u["est_ypt"] = u["est_ypt"] * (1 - cut)
+        u["est_cr"] = u["est_cr"] * (1 - crc)
 
     # ---- rushing
     c_share = (u["p_car"] / u["p_tc"].replace(0, np.nan)).where(has)
