@@ -154,6 +154,8 @@ def _games(sch: pd.DataFrame) -> pd.DataFrame:
     fw = sch["fc_wind"].to_numpy(float) if "fc_wind" in sch else np.full(len(sch), np.nan)
     played = sch["result"].notna().to_numpy()
     a["wind"] = np.where(played, pw, fw)
+    a["home_rest"] = sch["home_rest"].to_numpy(float) if "home_rest" in sch else np.nan
+    a["away_rest"] = sch["away_rest"].to_numpy(float) if "away_rest" in sch else np.nan
     a["wind_x"] = weather.wind_x(a["wind"])
     # rain: forecast chance for upcoming games; observed 1/0 for played games only when supplied (fitting)
     obs = sch["rain_obs"].to_numpy(float) if "rain_obs" in sch else np.zeros(len(sch))
@@ -163,6 +165,9 @@ def _games(sch: pd.DataFrame) -> pd.DataFrame:
     w = a.rename(columns={"away_team": "team", "home_team": "opp", "away_qb_id": "qb_id"}).assign(home=False)
     g = pd.concat([h, w], ignore_index=True).drop(columns=["away_qb_id", "home_qb_id"], errors="ignore")
     g["team_spread"] = np.where(g["home"], -g["spread_line"], g["spread_line"])  # negative = favored
+    g["rest"] = np.where(g["home"], g["home_rest"], g["away_rest"])       # days since last game
+    g["opp_rest"] = np.where(g["home"], g["away_rest"], g["home_rest"])
+    g = g.drop(columns=["home_rest", "away_rest"])
     g["played"] = g["result"].notna()
     return g
 
@@ -253,7 +258,7 @@ def _universe(raw: dict, include_upcoming: bool) -> tuple[pd.DataFrame, pd.DataF
         raw["excluded"] = pd.concat(excluded, ignore_index=True) if excluded else pd.DataFrame()
     G = G[G["played"] | G["game_id"].isin(u.loc[u["upcoming"], "game_id"])]
     u = u.merge(G[["game_id", "team", "opp", "home", "team_spread", "total_line", "team_targets", "team_carries",
-                   "wind", "wind_x", "rain_x"]],
+                   "wind", "wind_x", "rain_x", "rest", "opp_rest"]],
                 on=["game_id", "team"], how="left")
     u["pos"] = u["position"].map(_pos)
     return u, G
@@ -493,7 +498,7 @@ def _qb_features(raw: dict, G: pd.DataFrame, T: pd.DataFrame) -> pd.DataFrame:
     qb_all = ps[ps["attempts"] > 0][["player_id", "player_display_name", "game_id", "season", "week", "team",
                                      "attempts", "passing_yards"]]
     Q = G[["game_id", "season", "week", "team", "opp", "qb_id", "played", "team_spread", "total_line", "team_att",
-           "wind", "wind_x", "rain_x"]].copy()
+           "wind", "wind_x", "rain_x", "rest", "opp_rest"]].copy()
     nxt = next_games(raw["sch"][raw["sch"]["season"] == raw["sch"]["season"].max()])
     keep_next = set(zip(nxt["team"], nxt["game_id"]))
     Q = Q[Q["played"].to_numpy() | np.array([(t, g) in keep_next for t, g in zip(Q["team"], Q["game_id"])], dtype=bool)]

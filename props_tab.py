@@ -73,7 +73,7 @@ def _market_frame(R: dict, market: str, force_ids: set | None = None) -> pd.Data
     if market == "pass_yards":
         df = pd.DataFrame({
             "player_id": q["qb_id"], "Player": q["name"], "Pos": "QB", "team": q["team"], "opp": q["opp"],
-            "wind": q.get("wind"), "rain": q.get("rain_x"),
+            "wind": q.get("wind"), "rain": q.get("rain_x"), "rest": q.get("rest"), "opp_rest": q.get("opp_rest"),
             "game_id": q["game_id"], "season_pg": q["ypg_season"], "l4_pg": q["l4_pass_yds"],
             "Usage": q["att_pg_season"].map(lambda x: f"{x:.0f} att/g" if pd.notna(x) else "—")
                      + " · " + q["est_ypa"].map(lambda x: f"{x:.1f} YPA"),
@@ -103,7 +103,7 @@ def _market_frame(R: dict, market: str, force_ids: set | None = None) -> pd.Data
             "Usage": up["tshare_adj"].map(lambda x: f"{x:.0%}") + " · "
                      + up["E_tgt"].map(lambda x: f"{x:.1f} tgt"),
             "opp_text": opp_text, "opp_val": vals, "opp_rank": rnks,
-            "mu": up["mu_" + market], "games": up["c_g"], "inj": up["inj_status"], "new_team": up["new_team"], "wind": up.get("wind"), "rain": up.get("rain_x"),
+            "mu": up["mu_" + market], "games": up["c_g"], "inj": up["inj_status"], "new_team": up["new_team"], "wind": up.get("wind"), "rain": up.get("rain_x"), "rest": up.get("rest"), "opp_rest": up.get("opp_rest"),
             "ret": up["returning"].fillna(False),
             "team_spread": up["team_spread"], "total_line": up["total_line"], "dist_key": market, "kind": "skill",
         })
@@ -119,7 +119,7 @@ def _market_frame(R: dict, market: str, force_ids: set | None = None) -> pd.Data
         "Usage": rb["cshare_adj"].map(lambda x: f"{x:.0%}") + " · " + rb["est_ypc"].map(lambda x: f"{x:.1f} YPC"),
         "opp_val": rb["opp_carries_pg" if stat == "carries" else "opp_rush_yds_pg"],
         "opp_label": "to RBs", "opp_group": "rb",
-        "mu": rb["mu_" + market], "games": rb["c_g"], "inj": rb["inj_status"], "new_team": rb["new_team"], "wind": rb.get("wind"), "rain": rb.get("rain_x"),
+        "mu": rb["mu_" + market], "games": rb["c_g"], "inj": rb["inj_status"], "new_team": rb["new_team"], "wind": rb.get("wind"), "rain": rb.get("rain_x"), "rest": rb.get("rest"), "opp_rest": rb.get("opp_rest"),
         "ret": rb["returning"].fillna(False),
         "team_spread": rb["team_spread"], "total_line": rb["total_line"], "dist_key": market, "kind": "skill",
     })
@@ -128,7 +128,7 @@ def _market_frame(R: dict, market: str, force_ids: set | None = None) -> pd.Data
     qd = R["qb_def"]
     qb_df = pd.DataFrame({
         "player_id": qq["qb_id"], "Player": qq["name"], "Pos": "QB", "team": qq["team"], "opp": qq["opp"],
-        "wind": qq.get("wind"), "rain": qq.get("rain_x"),
+        "wind": qq.get("wind"), "rain": qq.get("rain_x"), "rest": qq.get("rest"), "opp_rest": qq.get("opp_rest"),
         "game_id": qq["game_id"],
         "season_pg": qq["qcar_pg_season"] if stat == "carries" else qq["qrush_pg_season"],
         "l4_pg": qq["l4_qcar"] if stat == "carries" else qq["l4_qrush"],
@@ -161,6 +161,12 @@ def _flags(r, out_by_team: dict) -> str:
     rn = r.get("rain")
     if rn is not None and rn == rn and rn >= 0.5:  # info only: rain is not in the projection (see model/rain_backtest.py)
         f.append(f"rain {rn:.0%}")
+    rs, ors = r.get("rest"), r.get("opp_rest")
+    if rs is not None and rs == rs:  # info only (see post-bye / rest-advantage analysis); not in the projection
+        if rs >= 13:
+            f.append("off bye")
+        if ors is not None and ors == ors and abs(rs - ors) >= 3:
+            f.append(f"rest {rs - ors:+.0f}")
     if pd.notna(r["games"]) and r["games"] < 4:
         f.append(f"{int(r['games'])} g")
     if r.get("new_team"):
@@ -429,7 +435,7 @@ def render():
           "Last 4": st.column_config.NumberColumn(help="Per game, last 4 games played"),
           "Book P(over)": st.column_config.NumberColumn("Book", help="Book's P(over), margin removed"),
           "P(over)": st.column_config.NumberColumn("Model", help="Model P(over)"),
-          "Flags": st.column_config.TextColumn(width="small", help="Injury status, wind 15+ mph and rain chance 50%+ (forecast, outdoor games; rain is info only), small sample, new team, returning, teammates out")}
+          "Flags": st.column_config.TextColumn(width="small", help="Injury status, wind 15+ mph and rain chance 50%+ (forecast, outdoor games; rain is info only), off bye, rest +/- (days of rest vs opponent, 3+ apart; info only), small sample, new team, returning, teammates out")}
     # table fills the rest of the window (CSS in app.py), so headers stay visible and the page doesn't scroll
     event = st.dataframe(sty, hide_index=True, width="stretch", height=600, key=f"pm_table_{market}",
                          column_config=cc, on_select="rerun", selection_mode=["single-row", "single-cell"])
