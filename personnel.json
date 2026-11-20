@@ -1,0 +1,8 @@
+{
+ "note": "Only adjustments that held up out of sample (model/personnel_backtest.py). Missing opposing starting CBs raised QB passing yards ~4% per CB in each of 2023-26; every other unit/market was unstable and made projections worse out of sample, so they are flags only.",
+ "coefs": {
+  "pass_yards|QB": {
+   "opp_CB": 0.03922
+  }
+ }
+}

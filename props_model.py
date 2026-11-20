@@ -26,6 +26,7 @@ import pandas as pd
 import polars as pl
 from scipy import stats
 
+import personnel
 import weather
 
 HERE = Path(__file__).parent
@@ -153,7 +154,11 @@ def load_raw(seasons: list[int], current: int | None = None) -> dict:
                 ["season", "week", "team", "gsis_id", "status", "status_description_abbr"]).to_pandas()
         except Exception:
             rost = None
-    return {"ps": ps, "sn": sn, "sch": sch, "players": players, "inj": inj, "rost": rost}
+    try:  # OverTheCap contract positions (separates edge rushers from off-ball LBs) for personnel.py
+        contracts = nfl.load_contracts().select(["gsis_id", "position", "year_signed"]).to_pandas()
+    except Exception:
+        contracts = None
+    return {"ps": ps, "sn": sn, "sch": sch, "players": players, "inj": inj, "rost": rost, "contracts": contracts}
 
 
 def _games(sch: pd.DataFrame) -> pd.DataFrame:
@@ -220,6 +225,12 @@ def _universe(raw: dict, include_upcoming: bool) -> tuple[pd.DataFrame, pd.DataF
     nq = (ps[ps["position"] != "QB"].groupby(["game_id", "team"])
           .agg(team_carries=("carries", "sum"), team_rush_yds=("rushing_yards", "sum")).reset_index())
     G = _games(raw["sch"]).merge(tt, on=["game_id", "team"], how="left").merge(nq, on=["game_id", "team"], how="left")
+    try:  # missing starters by unit (own OL, opposing defense): played games from snaps, upcoming from injuries
+        G = G.merge(personnel.missing(raw, G), on=["game_id", "team"], how="left")
+    except Exception:
+        pass
+    for f in personnel.FEATURES:
+        G[f] = G[f].fillna(0) if f in G else 0.0
     for c in ["team_targets", "team_att", "team_pyds", "team_carries", "team_rush_yds"]:
         G[c] = G[c].fillna(0)
 
@@ -274,7 +285,7 @@ def _universe(raw: dict, include_upcoming: bool) -> tuple[pd.DataFrame, pd.DataF
         raw["excluded"] = pd.concat(excluded, ignore_index=True) if excluded else pd.DataFrame()
     G = G[G["played"] | G["game_id"].isin(u.loc[u["upcoming"], "game_id"])]
     u = u.merge(G[["game_id", "team", "opp", "home", "team_spread", "total_line", "team_targets", "team_carries",
-                   "wind", "wind_x", "rain_x", "rest", "opp_rest"]],
+                   "wind", "wind_x", "rain_x", "rest", "opp_rest"] + personnel.FEATURES],
                 on=["game_id", "team"], how="left")
     u["pos"] = u["position"].map(_pos)
     return u, G
@@ -597,7 +608,7 @@ def _qb_features(raw: dict, G: pd.DataFrame, T: pd.DataFrame) -> pd.DataFrame:
     qb_all = ps[ps["attempts"] > 0][["player_id", "player_display_name", "game_id", "season", "week", "team",
                                      "attempts", "passing_yards"]]
     Q = G[["game_id", "season", "week", "team", "opp", "qb_id", "played", "team_spread", "total_line", "team_att",
-           "wind", "wind_x", "rain_x", "rest", "opp_rest"]].copy()
+           "wind", "wind_x", "rain_x", "rest", "opp_rest"] + personnel.FEATURES].copy()
     nxt = next_games(raw["sch"][raw["sch"]["season"] == raw["sch"]["season"].max()])
     keep_next = set(zip(nxt["team"], nxt["game_id"]))
     Q = Q[Q["played"].to_numpy() | np.array([(t, g) in keep_next for t, g in zip(Q["team"], Q["game_id"])], dtype=bool)]
@@ -728,10 +739,32 @@ def wind_mult(df: pd.DataFrame, market: str) -> np.ndarray:
     return np.exp(z)
 
 
+_PERS_PATH = Path(__file__).parent / "model" / "personnel.json"
+PERS = json.loads(_PERS_PATH.read_text()).get("coefs", {}) if _PERS_PATH.exists() else {}
+
+
+def personnel_mult(df: pd.DataFrame, market: str) -> np.ndarray:
+    """Missing-starter multiplier. Keys 'market|group' (group WR/TE, RB or QB by the row's position)."""
+    if not PERS or not any(f in df for f in personnel.FEATURES):
+        return np.ones(len(df))
+    pos = df["pos"].fillna("RB").to_numpy() if "pos" in df else np.full(len(df), "QB")
+    grp = np.where(np.isin(pos, ["WR", "TE"]), "WR/TE", np.where(pos == "RB", "RB", "QB"))
+    if market in ("pass_yards", "qb_carries", "qb_rush_yards"):
+        grp = np.full(len(df), "QB")
+    z = np.zeros(len(df))
+    for g in ["WR/TE", "RB", "QB"]:
+        tbl = PERS.get(f"{market}|{g}", {})
+        m = grp == g
+        for f, b in tbl.items():
+            if f in df and m.any():
+                z[m] += b * df[f].fillna(0).to_numpy(float)[m]
+    return np.exp(z)
+
+
 def apply(df: pd.DataFrame, market: str, coefs: list[float]) -> np.ndarray:
     base_cols, mcols = SPEC[market]
     base = np.prod([df[c].to_numpy(float) for c in base_cols], axis=0)
-    return base * _mult(df, coefs, mcols) * wind_mult(df, market)
+    return base * _mult(df, coefs, mcols) * wind_mult(df, market) * personnel_mult(df, market)
 
 
 def fit_wind(df: pd.DataFrame, market: str, y: str, coefs: list[float], col: str = "wind_x") -> float:
