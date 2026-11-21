@@ -15,6 +15,7 @@ import streamlit as st
 import nfl_data as d
 import defense_log
 import game_ratings
+import cfb_ratings
 import props_tab
 import qb_tab
 
@@ -189,12 +190,14 @@ def render_qb():
     qb_tab.render(season, include_post, weeks, d.next_opponents(raw["schedules"]))
 
 
-tab_props, tab_match, tab_qb = st.tabs(["Props", "Matchups", "QB rushing"])
+tab_props, tab_match, tab_qb, tab_cfb = st.tabs(["Props", "Matchups", "QB rushing", "College"])
 with tab_props:
     props_tab.render()
 with tab_match:
     render_matchups()
 with tab_qb:
     render_qb()
+with tab_cfb:
+    cfb_ratings.render(SEASONS)
 
 st.caption("Data: nflverse (CC-BY 4.0) + FTN charting (CC-BY-SA 4.0) via nflreadpy.")
