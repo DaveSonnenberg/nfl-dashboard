@@ -321,7 +321,9 @@ def render(seasons: list[int]):
         st.info("No college schedule for this season yet.")
         return
     s = s[(s["home_division"] == "fbs") | (s["away_division"] == "fbs")]
-    upcoming = s[~s["completed"].astype(bool)]
+    now = pd.Timestamp.now(tz="America/Chicago")
+    # skip stale unplayed games (cancelled / postponed) from past weeks
+    upcoming = s[~s["completed"].astype(bool) & (s["kick"] >= now - pd.Timedelta(days=1))]
     weeks = sorted(s["wk"].unique())
     default_wk = int(upcoming["wk"].min()) if len(upcoming) else int(max(weeks))
     confs = sorted({c for c in pd.concat([s.loc[s.home_division == "fbs", "home_conference"],
